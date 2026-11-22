@@ -27,4 +27,4 @@ jobs:
         run: python -m pip install 'conductor-cli @ git+https://github.com/microsoft/conductor.git@ac6b1f4abe8023a51045f946f67199b0f9fc47c8'
       - name: Run the Script step smoke test
         shell: pwsh
-        run: ./.conductor/scripts/test-smoke.ps1
+        run: pwsh -NoLogo -NoProfile -NonInteractive -File ./.conductor/scripts/test-smoke.ps1
