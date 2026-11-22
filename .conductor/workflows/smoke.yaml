@@ -1,0 +1,48 @@
+workflow:
+  name: irisync-smoke
+  description: Verify the Windows Script step without an LLM provider.
+  version: '1.0.0'
+  entry_point: probe
+  input:
+    mode:
+      type: string
+      required: true
+    work_dir:
+      type: string
+      required: true
+    script_path:
+      type: string
+      required: true
+  limits:
+    max_iterations: 3
+    timeout_seconds: 30
+
+agents:
+  - name: probe
+    type: script
+    command: pwsh.exe
+    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', '{{ workflow.input.script_path }}', '-Mode', '{{ workflow.input.mode }}']
+    working_dir: '{{ workflow.input.work_dir }}'
+    timeout: 8
+    routes:
+      - to: success
+        when: 'exit_code == 0'
+      - to: failure
+  - name: success
+    type: script
+    command: pwsh.exe
+    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'success'"]
+    routes:
+      - to: $end
+  - name: failure
+    type: script
+    command: pwsh.exe
+    args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', "Write-Output 'failure'"]
+    routes:
+      - to: $end
+
+output:
+  branch: '{{ (success.output.stdout if probe.output.exit_code == 0 else failure.output.stdout) | trim }}'
+  script_exit: '{{ probe.output.exit_code }}'
+  mode: '{{ probe.output.mode }}'
+  working_directory: '{{ probe.output.working_directory }}'
