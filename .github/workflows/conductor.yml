@@ -4,14 +4,52 @@ on:
   pull_request:
   push:
     branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - '.conductor/**'
+      - '.github/**'
+      - '*.md'
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  changed-files:
+    name: Check changed paths
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip-smoke: ${{ steps.paths.outputs.skip-smoke }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check for changes outside the excluded paths
+        id: paths
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- . \
+              ':(top,exclude)docs/**' ':(top,exclude).conductor/**' \
+              ':(top,exclude).github/**' ':(top,glob,exclude)*.md'; then
+            echo 'skip-smoke=true' >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [ "$status" -ne 1 ]; then
+              exit "$status"
+            fi
+          fi
+
   conductor-smoke:
     name: Conductor smoke (Windows)
+    # A skipped job satisfies the required check for a PR. A failed path check runs the smoke test.
+    needs: changed-files
+    if: ${{ !cancelled() && (needs.changed-files.result != 'success' || needs.changed-files.outputs.skip-smoke != 'true') }}
     runs-on: windows-2025
     timeout-minutes: 10
     env:
