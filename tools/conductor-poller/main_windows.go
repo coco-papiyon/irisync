@@ -1,0 +1,180 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"slices"
+	"sync"
+	"time"
+)
+
+const childFlag = "--conductor-child"
+
+func main() {
+	if len(os.Args) >= 3 && os.Args[1] == childFlag {
+		os.Exit(runChild(os.Args[2:]))
+	}
+	if len(os.Args) == 4 && os.Args[1] == "--design-adapter" {
+		if err := runDesignAdapter(os.Args[2], os.Args[3]); err != nil {
+			slog.Error("Codex design failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 4 && os.Args[1] == "--implementation-adapter" {
+		if err := runImplementationStep(os.Args[2], os.Args[3]); err != nil {
+			slog.Error("implementation step failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if len(os.Args) == 3 && (os.Args[1] == "--pr-review-adapter" || os.Args[1] == "--merge-check-adapter") {
+		if err := runReviewAdapter(os.Args[1], os.Args[2]); err != nil {
+			slog.Error("PR review step failed", "error", err)
+			os.Exit(1)
+		}
+		return
+	}
+	configPath := flag.String("config", ".conductor/poller.example.yaml", "YAML configuration file")
+	once := flag.Bool("once", false, "poll once and wait for eligible runs")
+	flag.Parse()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	if err := run(ctx, *configPath, *once); err != nil && !errors.Is(err, context.Canceled) {
+		slog.Error("poller stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func run(ctx context.Context, configPath string, once bool) error {
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
+		return err
+	}
+	db, closeState, err := openState(ctx, cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	defer closeState()
+	gh := githubProject{cfg: cfg}
+	conductor, err := newConductor(cfg)
+	if err != nil {
+		return err
+	}
+	return (&poller{cfg: cfg, github: gh, conductor: conductor, db: db}).loop(ctx, once)
+}
+
+type poller struct {
+	cfg           config
+	github        githubProject
+	conductor     conductorRunner
+	db            *state
+	workers       sync.WaitGroup
+	slots         chan struct{}
+	designMu      sync.Mutex
+	activeDesigns map[string]bool
+}
+
+func (p *poller) loop(ctx context.Context, once bool) error {
+	p.slots = make(chan struct{}, p.cfg.ParallelRuns)
+	p.activeDesigns = make(map[string]bool)
+	defer p.workers.Wait()
+
+	delay := p.cfg.PollInterval
+	for {
+		err := p.poll(ctx)
+		if once || ctx.Err() != nil {
+			return err
+		}
+		if err == nil {
+			delay = p.cfg.PollInterval
+		} else {
+			slog.Warn("poll failed; retrying", "error", err, "delay", delay)
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		if err != nil {
+			delay = min(delay*2, p.cfg.PollInterval*4)
+		}
+	}
+}
+
+func (p *poller) poll(ctx context.Context) error {
+	items, err := p.github.ready(ctx)
+	if err != nil {
+		return err
+	}
+	started := 0
+	for _, item := range items {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if item.Status == "Design Review" && !slices.Contains(p.cfg.ImplementationIssueNumbers, item.Number) {
+			p.designMu.Lock()
+			active := p.activeDesigns[item.ID]
+			p.designMu.Unlock()
+			if !active {
+				if err := p.advanceDesign(ctx, item); err != nil {
+					slog.Warn("design approval could not be checked", "issue", item.Number, "error", err)
+				}
+			}
+			continue
+		}
+		select {
+		case p.slots <- struct{}{}:
+		default:
+			continue
+		}
+		if slices.Contains(p.cfg.DesignIssueNumbers, item.Number) {
+			if !p.launchDesign(ctx, item) {
+				<-p.slots
+			} else {
+				started++
+			}
+			continue
+		}
+		runID, err := p.db.claim(ctx, item, p.cfg.MaxAttempts)
+		if err != nil || runID == 0 {
+			<-p.slots
+			if err != nil {
+				return err
+			}
+			continue
+		}
+		started++
+		p.workers.Add(1)
+		go p.execute(ctx, item, runID)
+	}
+	slog.Info("project polled", "ready", len(items), "started", started)
+	return nil
+}
+
+func (p *poller) execute(ctx context.Context, item projectIssue, runID int64) {
+	defer p.workers.Done()
+	defer func() { <-p.slots }()
+	logPath := filepath.Join(p.cfg.DataDir, fmt.Sprintf("run-%d.log", runID))
+	runCtx, cancel := context.WithTimeout(ctx, p.cfg.WorkflowTimeout)
+	defer cancel()
+	result := p.conductor.run(runCtx, logPath)
+	saveCtx, stopSave := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopSave()
+	if err := p.db.finish(saveCtx, runID, logPath, result); err != nil {
+		slog.Error("could not save run result", "run", runID, "error", err)
+	}
+	slog.Info("workflow finished", "issue", item.Number, "run", runID, "outcome", result.outcome, "exit_code", result.exitCode)
+}

@@ -1,0 +1,21 @@
+workflow:
+  name: irisync-merge-check
+  entry_point: check
+  mcp:
+    expose: false
+  input:
+    adapter:
+      type: string
+      required: true
+    manifest:
+      type: string
+      required: true
+agents:
+  - name: check
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--merge-check-adapter', '{{ workflow.input.manifest }}']
+    routes:
+      - to: $end
+output:
+  exit_code: '{{ check.output.exit_code }}'

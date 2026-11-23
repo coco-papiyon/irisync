@@ -1,0 +1,21 @@
+workflow:
+  name: irisync-pr-review
+  entry_point: review
+  mcp:
+    expose: false
+  input:
+    adapter:
+      type: string
+      required: true
+    manifest:
+      type: string
+      required: true
+agents:
+  - name: review
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--pr-review-adapter', '{{ workflow.input.manifest }}']
+    routes:
+      - to: $end
+output:
+  exit_code: '{{ review.output.exit_code }}'

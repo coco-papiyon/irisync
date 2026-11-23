@@ -36,3 +36,43 @@ gh project view 4 --owner coco-papiyon --format json --jq '.title'
 2. `Irisync main pull requests` に `Conductor smoke (Windows)` の成功を必須チェックとして追加する。自動化のPRを受け付ける前に、人間によるレビューを1件以上必須にする。初回の基盤PRが承認者本人の作成であれば、基盤PRを受け入れてからレビュー必須を有効にする。
 3. `Restrict updates` は、PR・承認・CIを強制するルールセットとは別に作成する。マージを担当する人間だけに **For pull requests only** の例外を与え、PR・承認・CI側にはこの例外を追加しない。検証用ブランチにも同じルールを適用する。 [GitHub Rulesetsの作成](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository) · [利用できるルール](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
 4. 検証用IssueをProjectに入れる。実行用アカウントで `Backlog` → `Ready` の読み書きができ、保護された検証用ブランチへの直接pushとPRマージが拒否されることを確認する。人間の承認とCI通過後に、人間が同じPRをマージできることを確認する。
+
+## Polling Controllerの試運転
+
+Projectの読み取り、SQLiteへの実行履歴の保存、Conductorのスモークワークフロー起動を試せる。設定例は対象Issueを空にしているため、既存Issueの処理を開始せずにGitHub接続だけを確認できる。
+
+```powershell
+Push-Location tools/conductor-poller
+go test ./...
+go build -o ../../.conductor/.local/poller.exe .
+Pop-Location
+.\.conductor\.local\poller.exe -config .conductor/poller.example.yaml -once
+```
+
+Conductorまで試すときは `.conductor/poller.example.yaml` を `.conductor/poller.local.yaml` にコピーし、`test_issue_numbers` に検証専用Issueの番号を入れ、ProjectでそのIssueを `Ready` にする。起動時の1回だけ確認する場合は `-once` を指定する。常駐時は `-once` を外し、Ctrl+Cで停止する。SQLiteと各実行のログは `.conductor/.local/` に保存する。
+
+再起動時は中断した実行を記録し、GitHubで対象Issueが引き続き `Ready` の場合にだけ上限内で再試行する。スモークワークフローの実行によるProjectのStatus更新やPR作成は行わない。
+
+## Codexによる設計と承認
+
+Conductorを実行するWindowsユーザーで `codex login status` を確認する。`poller.local.yaml` の `design_issue_numbers` に設計対象のIssue番号を入れ、`design_approver_ids` に承認者のGitHub数値IDを設定する。`gh api users/coco-papiyon --jq .id` で所有者のIDを確認できる。対象IssueはProjectの `Ready` に移す。設定例の空リストでは、Issue情報のCodex送信やGitHubへの書き込みは発生しない。
+
+Polling Controllerは、Issue情報とローカルの設計文書をCodex CLIに渡してMarkdownを生成する。実行時はレビュー済みブランチのチェックアウトを使い、Issue本文には設計に必要な公開情報だけを記載する。設計書は `conductor/design/issue-N` ブランチの `docs/design/issues/issue-N.md` に保存され、Issueにコミット固定リンクと承認コマンドが表示される。
+
+承認者はリンク先を確認し、Issueに表示された `/approve-design コミットSHA` を1行で新規コメントとして投稿する。設計コミットが変更されたら、新しい承認リクエストに対して承認する。Codexの処理は `Design Review` に移ると終了し、Polling Controllerが承認者・コメントID・SHAをSQLiteに記録する。
+
+## 承認済み設計の実装とPR作成
+
+自動実装を許可するIssueを `poller.local.yaml` の `implementation_issue_numbers` に追加する。ここに指定する番号は `design_issue_numbers` にも含める。空リストのままでは設計承認後も実装は開始しない。
+
+Polling Controllerは承認コメントと設計SHAを再確認し、`main` のコミットを基点にIssue専用worktreeを作る。Codexが読み取り専用で生成した差分をGitで確認して適用する。実装後は書式と差分を確認し、WindowsサンドボックスでGoの静的解析・テスト・ビルドとConductorのスモークテストを実行する。Goの依存モジュールは事前に実行環境へ取得する。機械検証の後にCodexが差分を自己チェックし、すべて通過したGitツリーをコミットする。
+
+初回実装後の修正は最大3回。解決できなければ `Blocked` に移る。通過時だけIssue専用ブランチをpushして `main` 向けPRを作り、Projectを `PR Review` に移す。中断後は同じ作業ブランチのPRとコミットを照合する。ログとworktreeは `data_dir` 以下に残る。
+
+## PRレビューとマージ確認
+
+`implementation_issue_numbers` にあるIssueは、PR作成後も監視する。独立したCodexセッションがPRのHEADとベースの差分をレビューし、同じコミットの結果をPRに投稿する。修正時は専用worktreeで差分を適用し、検証と自己チェックを通過したコミットを既存PRのブランチに追加する。新しいHEADはもう一度、独立レビューとWindows CIを通す。
+
+人間が修正を依頼する場合は、`design_approver_ids` に登録されたアカウントで、現在のPRに **Request changes** としてレビューを投稿する。本文とそのレビューの行コメントを修正に使う。AIレビューと人間レビューの修正上限はそれぞれ最大3回。コンフリクト解消は別に最大2回とし、1回あたりの上限は15分または `implementation_timeout` の短い方とする。
+
+コンフリクトがなく、現在のHEADの独立レビューと `Conductor smoke (Windows)` が成功したら `Merge Ready` に移る。人間がPRをレビューしてマージする。Polling ControllerはGitHubが返すマージ結果と承認者IDを照合し、確認できた場合にIssueを `Done` にする。

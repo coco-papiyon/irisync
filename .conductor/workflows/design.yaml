@@ -1,0 +1,27 @@
+workflow:
+  name: irisync-design
+  entry_point: design
+  mcp:
+    expose: false
+  input:
+    adapter:
+      type: string
+      required: true
+    input_path:
+      type: string
+      required: true
+    output_path:
+      type: string
+      required: true
+
+agents:
+  - name: design
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--design-adapter', '{{ workflow.input.input_path }}', '{{ workflow.input.output_path }}']
+    routes:
+      - to: $end
+
+output:
+  exit_code: '{{ design.output.exit_code }}'
+  adapter_error: '{{ design.output.stderr | trim }}'
