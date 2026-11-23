@@ -143,9 +143,9 @@ Goの`time.Ticker`を使用し、5分間隔でGitHub Projectsを監視する。
 
 ### 4.2 ポーリング処理
 
-1. GitHub Projectsから対象アイテムを取得する。
+1. GitHub ProjectsからIssue ID、Statusなどの判定に必要なメタデータを取得する。
 2. SQLiteの実行状態と照合する。
-3. IssueのStatusおよび承認・PR状態を判定する。
+3. `Pending` の前提Issueを照合して条件を満たした項目を `Ready` に更新し、取得済みのStatus・承認・PR状態からワークフローの起動条件を判定する。今回 `Ready` へ移したIssueは次回のポーリングで起動対象にする。
 4. 起動が必要なワークフローを選択する。
 5. 同一Issueの実行状態を排他的に確保する。
 6. Execution Managerへ実行要求を渡す。
@@ -208,6 +208,7 @@ gh auth refresh --hostname github.com --scopes project
 | Status        | 意味            |
 | ------------- | ------------- |
 | Backlog       | 未着手           |
+| Pending       | 前提Issueの完了待ち   |
 | Ready         | AI処理開始待ち      |
 | Designing     | AI設計中         |
 | Design Review | 人間の設計承認待ち     |
@@ -251,19 +252,27 @@ gh project link $projectNumber --owner $projectOwner --repo coco-papiyon/irisync
 
 ### 5.3 Statusの追加と修正
 
-1. GitHubのProjectで **Settings → Fields → Status** を開き、[Statusの定義](#51-statusの定義)の10項目と照合する。既存の `Status` がある場合は不足する選択肢を追加し、名称を修正する場合は既存カード・ビュー・Workflowsへの影響を確認してから保存する。移行対象のカードは、意味が対応する選択肢へ移す。 [GitHub Docs の単一選択フィールド](https://docs.github.com/en/issues/planning-and-tracking-with-projects/understanding-fields/about-single-select-fields)
+1. GitHubのProjectで **Settings → Fields → Status** を開き、[Statusの定義](#51-statusの定義)の11項目と照合する。既存の `Status` がある場合は不足する選択肢を追加し、名称を修正する場合は既存カード・ビュー・Workflowsへの影響を確認してから保存する。移行対象のカードは、意味が対応する選択肢へ移す。 [GitHub Docs の単一選択フィールド](https://docs.github.com/en/issues/planning-and-tracking-with-projects/understanding-fields/about-single-select-fields)
 2. `Status` フィールド自体がない場合は、単一選択フィールドを作成する。 [gh project field-create](https://cli.github.com/manual/gh_project_field-create)
 
    ```powershell
-   gh project field-create $projectNumber --owner $projectOwner --name Status --data-type SINGLE_SELECT --single-select-options 'Backlog,Ready,Designing,Design Review,Implementing,PR Review,PR Fixing,Merge Ready,Blocked,Done'
+   gh project field-create $projectNumber --owner $projectOwner --name Status --data-type SINGLE_SELECT --single-select-options 'Backlog,Pending,Ready,Designing,Design Review,Implementing,PR Review,PR Fixing,Merge Ready,Blocked,Done'
    ```
 
-3. 設定後に `gh project field-list` を再実行し、`Status` フィールドと10選択肢のIDを取得する。Projectの既定値や組み込みWorkflowsも確認し、Issueの追加やクローズだけで `Ready` や `Done` に移行する設定があれば修正する。 [GitHub Docs の組み込み自動化](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-built-in-automations)
+3. 設定後に `gh project field-list` を再実行し、`Status` フィールドと11選択肢のIDを取得する。Projectの既定値や組み込みWorkflowsも確認し、Issueの追加やクローズだけで `Ready` や `Done` に移行する設定があれば修正する。 [GitHub Docs の組み込み自動化](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-built-in-automations)
 4. 検証用IssueをProjectに追加し、Polling Controllerの実行アカウントから `Backlog` → `Ready` に更新できることを確認する。`$projectId` は `gh project view`、`$itemId` は `gh project item-list`、`$statusFieldId` と `$readyOptionId` は `gh project field-list` のJSON出力から取得する。 [gh project item-list](https://cli.github.com/manual/gh_project_item-list) · [gh project item-edit](https://cli.github.com/manual/gh_project_item-edit)
 
    ```powershell
    gh project item-edit --project-id $projectId --id $itemId --field-id $statusFieldId --single-select-option-id $readyOptionId
    ```
+
+### 5.4 前提IssueとPendingの判定
+
+Issueを起票・更新する人は、前提がある場合に本文の「先行Issue」欄へ前提Issueの番号またはURLをすべて記載し、同じIssueをGitHub標準の `Blocked by` に登録する。前提が揃い次第着手するIssueはProjectで `Pending` にする。 [GitHubのIssue依存関係](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-issue-dependencies)
+
+Go Polling Controllerは、起動時と定期ポーリング時に、対象リポジトリの未クローズかつ未アーカイブの `Pending` IssueだけについてGraphQLで `blockedBy` のIssue IDをまとめて取得する。Issue本文とAIを使わずに判定する。登録された前提が1件以上あり、その全件について同じProjectで `Done` を確認できた場合に `Ready` へ更新する。アーカイブされた前提は、同じProjectのStatusを個別に照合する。前提Issueのクローズ自体は完了条件に使わない。
+
+前提が1件も登録されていない場合や、登録済みの前提にProject未登録、閲覧不可、取得エラー、未完了がある場合は `Pending` を維持する。`Backlog` と `Blocked` は運用者が扱う。`Ready` に移ったIssueのConductor起動には、既存の対象Issue設定を適用する。
 
 ## 6. 開発ワークフロー
 

@@ -36,11 +36,9 @@ func isReviewStatus(status string) bool {
 }
 
 type projectIssue struct {
-	ID     string
-	ItemID string
-	Number int
-	Status string
-	Closed bool
+	ID, ItemID, Repository, Status string
+	Number                         int
+	Closed, Archived               bool
 }
 
 type projectPage struct {
@@ -66,7 +64,7 @@ type projectPage struct {
 	}
 }
 
-func (g githubProject) ready(ctx context.Context) ([]projectIssue, error) {
+func (g githubProject) projectIssues(ctx context.Context) ([]projectIssue, error) {
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.GitHubTimeout)
 	defer cancel()
 	var issues []projectIssue
@@ -94,19 +92,13 @@ func (g githubProject) ready(ctx context.Context) ([]projectIssue, error) {
 		items := page.Node.Items
 		for _, item := range items.Nodes {
 			issue := item.Content
-			if item.IsArchived || issue.ID == "" ||
-				!strings.EqualFold(issue.Repository.NameWithOwner, g.cfg.Repository) {
+			if issue.ID == "" {
 				continue
 			}
-			status := item.FieldValueByName.Name
-			smoke := status == "Ready" && slices.Contains(g.cfg.TestIssueNumbers, issue.Number)
-			design := slices.Contains(g.cfg.DesignIssueNumbers, issue.Number) &&
-				(status == "Ready" || status == "Designing" || status == "Design Review")
-			implement := status == "Implementing" && slices.Contains(g.cfg.ImplementationIssueNumbers, issue.Number)
-			review := isReviewStatus(status) && slices.Contains(g.cfg.ImplementationIssueNumbers, issue.Number)
-			if review || !issue.Closed && (smoke || design || implement) {
-				issues = append(issues, projectIssue{ID: issue.ID, ItemID: item.ID, Number: issue.Number, Status: status, Closed: issue.Closed})
-			}
+			issues = append(issues, projectIssue{
+				ID: issue.ID, ItemID: item.ID, Number: issue.Number, Status: item.FieldValueByName.Name,
+				Repository: issue.Repository.NameWithOwner, Closed: issue.Closed, Archived: item.IsArchived,
+			})
 		}
 		if !items.PageInfo.HasNextPage {
 			return issues, nil
@@ -116,6 +108,19 @@ func (g githubProject) ready(ctx context.Context) ([]projectIssue, error) {
 		}
 		after = items.PageInfo.EndCursor
 	}
+}
+
+func (g githubProject) runnable(issue projectIssue) bool {
+	if issue.Archived || !strings.EqualFold(issue.Repository, g.cfg.Repository) {
+		return false
+	}
+	status := issue.Status
+	smoke := status == "Ready" && slices.Contains(g.cfg.TestIssueNumbers, issue.Number)
+	design := slices.Contains(g.cfg.DesignIssueNumbers, issue.Number) &&
+		(status == "Ready" || status == "Designing" || status == "Design Review")
+	implement := status == "Implementing" && slices.Contains(g.cfg.ImplementationIssueNumbers, issue.Number)
+	review := isReviewStatus(status) && slices.Contains(g.cfg.ImplementationIssueNumbers, issue.Number)
+	return review || !issue.Closed && (smoke || design || implement)
 }
 
 func ghOutput(ctx context.Context, args ...string) ([]byte, error) {

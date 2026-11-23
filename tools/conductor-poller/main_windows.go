@@ -115,15 +115,20 @@ func (p *poller) loop(ctx context.Context, once bool) error {
 }
 
 func (p *poller) poll(ctx context.Context) error {
-	items, err := p.github.ready(ctx)
+	items, err := p.github.projectIssues(ctx)
 	if err != nil {
 		return err
 	}
-	started := 0
+	promoted, promotionErr := p.github.promotePending(ctx, items)
+	started, eligible := 0, 0
 	for _, item := range items {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		if !p.github.runnable(item) {
+			continue
+		}
+		eligible++
 		if item.Status == "Design Review" && !slices.Contains(p.cfg.ImplementationIssueNumbers, item.Number) {
 			p.designMu.Lock()
 			active := p.activeDesigns[item.ID]
@@ -160,8 +165,8 @@ func (p *poller) poll(ctx context.Context) error {
 		p.workers.Add(1)
 		go p.execute(ctx, item, runID)
 	}
-	slog.Info("project polled", "ready", len(items), "started", started)
-	return nil
+	slog.Info("project polled", "ready", eligible, "started", started, "promoted", promoted)
+	return promotionErr
 }
 
 func (p *poller) execute(ctx context.Context, item projectIssue, runID int64) {

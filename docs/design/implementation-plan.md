@@ -22,6 +22,8 @@ C01では、WindowsでConductor `0.1.47` のScript実行を検証した。C02で
 
 C02では、実行用アカウントによるProject項目の更新と、`main` に適用されたマージ権限・必須チェック・承認条件を確認した。検証用PRを使った直接pushとマージ拒否の実地試験は省略し、C03へ進む。
 
+前提のあるIssueは本文の「先行Issue」とGitHubの `Blocked by` に前提を記録し、着手待ちの項目を `Pending` にする。Polling Controllerが、すべての前提が同じProjectで `Done` になった項目を自動で `Ready` に移す。アプリ実装の先行関係は、本計画に沿ってIssueを起票する段階でGitHubへ反映する。 [前提Issueの判定仕様](conductor-feasibility-study.md#54-前提issueとpendingの判定)
+
 ### 1.2 実装前に決める運用仕様
 
 - **C02とC04**で、Projectの所有者、番号、StatusのフィールドIDと選択肢ID、設計承認を記録する場所と承認者の識別方法を決める。承認対象に設計SHAを含め、大幅な設計変更は再承認する。

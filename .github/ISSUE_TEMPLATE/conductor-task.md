@@ -8,6 +8,8 @@ title: '[Cxx] '
 
 ## 先行Issue
 
+前提とするIssueの番号またはURLをすべて記載し、GitHubの **Relationships → Mark as blocked by** でも登録する。前提がない場合は「なし」と記載する。前提が揃い次第着手するIssueには、Projectで `Pending` を設定する。
+
 ## 作業範囲
 
 ## 受入条件と検証方法
