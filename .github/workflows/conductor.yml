@@ -28,3 +28,26 @@ jobs:
       - name: Run the Script step smoke test
         shell: pwsh
         run: pwsh -NoLogo -NoProfile -NonInteractive -File ./.conductor/scripts/test-smoke.ps1
+      - name: Validate the design workflow
+        shell: pwsh
+        run: conductor validate ./.conductor/workflows/design.yaml
+      - name: Validate the implementation workflow
+        shell: pwsh
+        run: conductor validate ./.conductor/workflows/implement.yaml
+      - name: Validate the PR review and merge workflows
+        shell: pwsh
+        run: |
+          conductor validate ./.conductor/workflows/pr-review.yaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          conductor validate ./.conductor/workflows/merge-check.yaml
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.22.5'
+          cache-dependency-path: tools/conductor-poller/go.sum
+      - name: Check the Polling Controller
+        working-directory: tools/conductor-poller
+        shell: pwsh
+        run: |
+          go vet ./...
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go test ./...

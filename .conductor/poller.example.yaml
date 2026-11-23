@@ -1,0 +1,16 @@
+project_id: PVT_kwHOAJ17xM4BswJG
+repository: coco-papiyon/irisync
+github_login: coco-papiyon-developper
+poll_interval: 5m
+github_timeout: 30s
+workflow_timeout: 2m
+parallel_runs: 1
+max_attempts: 3
+data_dir: .local
+work_dir: ..
+test_issue_numbers: []
+design_issue_numbers: []
+design_approver_ids: [10320836]
+design_timeout: 15m
+implementation_issue_numbers: []
+implementation_timeout: 30m

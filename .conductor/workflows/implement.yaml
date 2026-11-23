@@ -1,0 +1,41 @@
+workflow:
+  name: irisync-implementation
+  entry_point: edit
+  mcp:
+    expose: false
+  input:
+    adapter:
+      type: string
+      required: true
+    manifest:
+      type: string
+      required: true
+
+agents:
+  - name: edit
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--implementation-adapter', 'edit', '{{ workflow.input.manifest }}']
+    routes:
+      - to: validate
+        when: 'exit_code == 0'
+      - to: $end
+  - name: validate
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--implementation-adapter', 'validate', '{{ workflow.input.manifest }}']
+    routes:
+      - to: self_review
+        when: 'exit_code == 0'
+      - to: $end
+  - name: self_review
+    type: script
+    command: '{{ workflow.input.adapter }}'
+    args: ['--implementation-adapter', 'review', '{{ workflow.input.manifest }}']
+    routes:
+      - to: $end
+
+output:
+  edit_exit: '{{ edit.output.exit_code }}'
+  validation_exit: '{% if validate is defined %}{{ validate.output.exit_code }}{% endif %}'
+  review_exit: '{% if self_review is defined %}{{ self_review.output.exit_code }}{% endif %}'
