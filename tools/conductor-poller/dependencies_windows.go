@@ -174,6 +174,7 @@ func (g githubProject) dependenciesDone(ctx context.Context, page dependencyPage
 // The main project query lists active items. Look up an absent prerequisite
 // directly to account for a Done item that has since been archived.
 func (g githubProject) projectStatusForIssue(ctx context.Context, id string) (string, error) {
+	g = g.projectAPI()
 	query := `query($id:ID!, $after:String) {
 	  viewer { login }
 	  node(id:$id) {

@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"slices"
 	"strings"
 	"time"
@@ -79,7 +78,7 @@ func (g githubProject) readDesignRef(ctx context.Context, branch, path string) (
 func (g githubProject) getJSON(ctx context.Context, target any, args ...string) error {
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.GitHubTimeout)
 	defer cancel()
-	data, err := ghOutput(ctx, append([]string{"api", "--hostname", "github.com"}, args...)...)
+	data, err := g.ghOutput(ctx, append([]string{"api", "--hostname", "github.com"}, args...)...)
 	if err != nil {
 		return err
 	}
@@ -89,19 +88,17 @@ func (g githubProject) getJSON(ctx context.Context, target any, args ...string) 
 func (g githubProject) mutate(ctx context.Context, method, endpoint string, input any) error {
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.GitHubTimeout)
 	defer cancel()
-	current, err := ghOutput(ctx, "api", "--hostname", "github.com", "user", "--jq", ".login")
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(string(current)), g.cfg.GitHubLogin) {
-		return fmt.Errorf("GitHub account changed before %s", method)
+	if _, err := g.automationIdentity(ctx); err != nil {
+		return fmt.Errorf("identify GitHub account before %s: %w", method, err)
 	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, "gh", "api", "--hostname", "github.com", endpoint, "--method", method, "--input", "-")
-	cmd.Env = append(cmd.Environ(), "GH_PROMPT_DISABLED=1", "GH_NO_UPDATE_NOTIFIER=1")
+	cmd, err := g.ghCommand(ctx, "api", "--hostname", "github.com", endpoint, "--method", method, "--input", "-")
+	if err != nil {
+		return err
+	}
 	cmd.Stdin = bytes.NewReader(payload)
 	out, err := cmd.Output()
 	if err != nil {
@@ -152,6 +149,7 @@ func (g githubProject) publishDesign(ctx context.Context, branch, path, markdown
 }
 
 func (g githubProject) setDesignStatus(ctx context.Context, item projectIssue, target string) error {
+	g = g.projectAPI()
 	query := `query($project:ID!,$item:ID!){
 		viewer{login}
 		item:node(id:$item){...on ProjectV2Item{isArchived,project{id},fieldValueByName(name:"Status"){...on ProjectV2ItemFieldSingleSelectValue{name}},content{...on Issue{id closed}}}}

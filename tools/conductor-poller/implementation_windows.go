@@ -223,7 +223,7 @@ func (p *poller) prepareWorktree(ctx context.Context, path, branch, base string)
 		if _, err := p.github.automationIdentity(ctx); err != nil {
 			return err
 		}
-		if _, err := gitOutput(ctx, p.cfg.WorkDir, "fetch", "--no-tags", p.github.repositoryURL(), base); err != nil {
+		if err := p.github.remoteGit(ctx, p.cfg.WorkDir, "fetch", "--no-tags", p.github.repositoryURL(), base); err != nil {
 			return err
 		}
 	}
@@ -243,6 +243,25 @@ func gitOutput(ctx context.Context, dir string, args ...string) ([]byte, error) 
 }
 
 func gitRawOutput(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	return runGit(ctx, dir, "", args...)
+}
+
+func (g githubProject) remoteGit(ctx context.Context, dir string, args ...string) error {
+	var token string
+	if g.app != nil {
+		ctx, cancel := context.WithTimeout(ctx, g.cfg.GitHubTimeout)
+		defer cancel()
+		installation, err := g.app.token(ctx)
+		if err != nil {
+			return err
+		}
+		token = installation.value
+	}
+	_, err := runGit(ctx, dir, token, args...)
+	return err
+}
+
+func runGit(ctx context.Context, dir, token string, args ...string) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	config := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
@@ -250,10 +269,17 @@ func gitRawOutput(ctx context.Context, dir string, args ...string) ([]byte, erro
 	cmd := exec.CommandContext(ctx, "git", append(config, args...)...)
 	cmd.Dir = dir
 	cmd.Env = append(cmd.Environ(), "GIT_TERMINAL_PROMPT=0")
+	if token != "" {
+		cmd.Env = append(cmd.Env, "GH_TOKEN="+token, "GH_PROMPT_DISABLED=1", "GH_DEBUG=")
+	}
 	output, err := cmd.Output()
 	if err != nil {
 		if exit, ok := err.(*exec.ExitError); ok && len(exit.Stderr) != 0 {
-			return output, fmt.Errorf("Git command failed: %s: %w", strings.TrimSpace(string(exit.Stderr)), err)
+			detail := strings.TrimSpace(string(exit.Stderr))
+			if token != "" {
+				detail = strings.ReplaceAll(detail, token, "[redacted]")
+			}
+			return output, fmt.Errorf("Git command failed: %s: %w", detail, err)
 		}
 		return output, err
 	}

@@ -1,5 +1,7 @@
 # Conductor開発環境のセットアップ
 
+Poller の起動手順と、設計を Issue コメントで承認する場面・実装 PR をマージする場面は、[Conductor Poller の使い方](../tools/conductor-poller/README.md)を参照する。
+
 ## Windowsでの検証
 
 Windowsで動作を確認した構成は、Conductor `0.1.47`、Python `3.12.13`、PowerShell `7.6.10`、Go `1.22.5`、Git `2.46.1.windows.1`、GitHub CLI `2.83.2`、Codex CLI `0.171.0-alpha.13`。ConductorはGitHub Actionsと同じ固定コミットを使う。 [Microsoft Conductorの固定コミット](https://github.com/microsoft/conductor/commit/ac6b1f4abe8023a51045f946f67199b0f9fc47c8)
@@ -14,7 +16,7 @@ GitHub Actionsの `Conductor smoke (Windows)` も同じスクリプトを実行�
 
 ## Projectと認証
 
-Irisyncは `coco-papiyon` が所有する非公開の [Project #4](https://github.com/users/coco-papiyon/projects/4) を使う。`Status` の定義、権限を確認するコマンド、検証用Issueの更新方法は[Conductor検討書](design/conductor-feasibility-study.md#45-github-cliの認証と起動前確認)を参照する。
+Irisyncは `coco-papiyon` が所有する非公開の [Project #4](https://github.com/users/coco-papiyon/projects/4) を使う。設定にはURLに表示される番号を `project_number: 4` として記載する。`Status` の定義、権限を確認するコマンド、検証用Issueの更新方法は[Conductor検討書](design/conductor-feasibility-study.md#45-github-cliの認証と起動前確認)を参照する。
 
 Projectの所有者は **… → Workflows** を開き、`Item closed`、`Pull request merged`、`Pull request linked to issue`、`Auto-close issue` を無効にする。`Item added to project` は移行先を `Backlog` に設定する。サブIssueの自動追加を使う場合も `Backlog` に入ることを確認する。運用者の操作または前提完了の判定で `Ready` に移り、Pollerが対応するPRのマージを確認すると `Done` に移る。 [GitHub Projectsの組み込み自動化](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-built-in-automations)
 
@@ -27,6 +29,8 @@ gh project view 4 --owner coco-papiyon --format json --jq '.title'
 ```
 
 `gh api user` の結果が実行用アカウントであることを確認する。Codexの子プロセスにGitHub管理用の認証情報を渡さない。 [個人所有Projectのアクセス管理](https://docs.github.com/en/issues/planning-and-tracking-with-projects/managing-your-project/managing-access-to-your-projects)
+
+GitHub App を使う場合は `github_auth_mode` を `app` に設定する。ソースの fetch・push、Issue、PR は bot 名義で操作し、Project は必須設定の `github_project_login` に指定した `gh` アカウントで読み書きする。設定例と必要な権限は [GitHub 認証を選ぶ](../tools/conductor-poller/README.md#github-認証を選ぶ)を参照する。
 
 ## ブランチ保護と受入
 
@@ -42,10 +46,8 @@ gh project view 4 --owner coco-papiyon --format json --jq '.title'
 Projectの読み取り、SQLiteへの実行履歴の保存、Conductorのスモークワークフロー起動を試せる。設定例ではConductorを起動するIssueを空にしている。`Pending` の前提完了判定と `Ready` への更新は動作する。
 
 ```powershell
-Push-Location tools/conductor-poller
-go test ./...
-go build -o ../../.conductor/.local/poller.exe .
-Pop-Location
+go -C tools/conductor-poller test ./...
+.\tools\conductor-poller\build.ps1
 .\.conductor\.local\poller.exe -config .conductor/poller.example.yaml -once
 ```
 
@@ -55,15 +57,15 @@ Conductorまで試すときは `.conductor/poller.example.yaml` を `.conductor/
 
 ## Codexによる設計と承認
 
-Conductorを実行するWindowsユーザーで `codex login status` を確認する。`poller.local.yaml` の `design_issue_numbers` に設計対象のIssue番号を入れ、`design_approver_ids` に承認者のGitHub数値IDを設定する。`gh api users/coco-papiyon --jq .id` で所有者のIDを確認できる。対象IssueはProjectの `Ready` に移す。前提があるIssueは本文と `Blocked by` に前提を登録して `Pending` にすると、すべての前提が `Done` になった次のポーリングで自動的に `Ready` へ移る。設定例の空リストでは、Issue情報をCodexへ送信しない。 [前提Issueの判定仕様](design/conductor-feasibility-study.md#54-前提issueとpendingの判定)
+Conductorを実行するWindowsユーザーで `codex login status` を確認する。通常運用では `poller.local.yaml` に `auto_ready: true` を設定し、`design_approver_ids` に承認者のGitHub数値IDを登録する。対象IssueをProjectの `Ready` にすると、Pollerが設計を開始する。前提があるIssueは本文と `Blocked by` に前提を登録して `Pending` にすると、すべての前提が `Done` になった次のポーリングで自動的に `Ready` へ移る。設定例では `auto_ready` が無効で、対象リストも空のため、Issue情報をCodexへ送信しない。 [前提Issueの判定仕様](design/conductor-feasibility-study.md#54-前提issueとpendingの判定)
 
 Polling Controllerは、Issue情報とローカルの設計文書をCodex CLIに渡してMarkdownを生成する。実行時はレビュー済みブランチのチェックアウトを使い、Issue本文には設計に必要な公開情報だけを記載する。設計書は `conductor/design/issue-N` ブランチの `docs/design/issues/issue-N.md` に保存され、Issueにコミット固定リンクと承認コマンドが表示される。
 
-承認者はリンク先を確認し、Issueに表示された `/approve-design コミットSHA` を1行で新規コメントとして投稿する。設計コミットが変更されたら、新しい承認リクエストに対して承認する。Codexの処理は `Design Review` に移ると終了し、Polling Controllerが承認者・コメントID・SHAをSQLiteに記録する。
+承認者は最新の依頼から設計書を確認し、`/approve-design` だけを1行でIssueに新規コメントとして投稿する。リポジトリ操作用とは別の人間のアカウントを承認者とし、その数値IDを `design_approver_ids` に登録する。設計が更新されたら最新の承認依頼に対して投稿し直す。Polling Controllerは承認者・コメントID・依頼の設計コミットSHAをSQLiteに記録する。
 
 ## 承認済み設計の実装とPR作成
 
-自動実装を許可するIssueを `poller.local.yaml` の `implementation_issue_numbers` に追加する。ここに指定する番号は `design_issue_numbers` にも含める。空リストのままでは設計承認後も実装は開始しない。
+`auto_ready: true` では設計承認後に自動実装へ進む。Issueごとに実装を許可する場合は `auto_ready: false` にし、`implementation_issue_numbers` に対象番号を追加する。ここに指定する番号は `design_issue_numbers` にも含める。
 
 Polling Controllerは承認コメントと設計SHAを再確認し、`main` のコミットを基点にIssue専用worktreeを作る。Codexが読み取り専用で生成した差分をGitで確認して適用する。実装後は書式と差分を確認し、WindowsサンドボックスでGoの静的解析・テスト・ビルドとConductorのスモークテストを実行する。Goの依存モジュールは事前に実行環境へ取得する。機械検証の後にCodexが差分を自己チェックし、すべて通過したGitツリーをコミットする。
 
@@ -71,7 +73,7 @@ Polling Controllerは承認コメントと設計SHAを再確認し、`main` の�
 
 ## PRレビューとマージ確認
 
-`implementation_issue_numbers` にあるIssueは、PR作成後も監視する。独立したCodexセッションがPRのHEADとベースの差分をレビューし、同じコミットの結果をPRに投稿する。修正時は専用worktreeで差分を適用し、検証と自己チェックを通過したコミットを既存PRのブランチに追加する。新しいHEADはもう一度、独立レビューとWindows CIを通す。
+Pollerは実装済みの対象IssueをPR作成後も監視する。独立したCodexセッションがPRのHEADとベースの差分をレビューし、同じコミットの結果をPRに投稿する。修正時は専用worktreeで差分を適用し、検証と自己チェックを通過したコミットを既存PRのブランチに追加する。新しいHEADはもう一度、独立レビューとWindows CIを通す。
 
 人間が修正を依頼する場合は、`design_approver_ids` に登録されたアカウントで、現在のPRに **Request changes** としてレビューを投稿する。本文とそのレビューの行コメントを修正に使う。AIレビューと人間レビューの修正上限はそれぞれ最大3回。コンフリクト解消は別に最大2回とし、1回あたりの上限は15分または `implementation_timeout` の短い方とする。
 

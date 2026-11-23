@@ -8,22 +8,6 @@ import (
 	"strings"
 )
 
-type githubIdentity struct {
-	Login string
-	ID    int64
-}
-
-func (g githubProject) automationIdentity(ctx context.Context) (githubIdentity, error) {
-	var actor githubIdentity
-	if err := g.getJSON(ctx, &actor, "user"); err != nil {
-		return actor, err
-	}
-	if actor.ID <= 0 || !strings.EqualFold(actor.Login, g.cfg.GitHubLogin) {
-		return actor, fmt.Errorf("unexpected GitHub account before implementation operation")
-	}
-	return actor, nil
-}
-
 func (g githubProject) repositoryURL() string {
 	return "https://github.com/" + g.cfg.Repository + ".git"
 }
@@ -125,6 +109,5 @@ func (p *poller) pushImplementation(ctx context.Context, branch, commit string) 
 	if _, err := p.github.automationIdentity(ctx); err != nil {
 		return err
 	}
-	_, err = gitOutput(ctx, p.cfg.WorkDir, "push", p.github.repositoryURL(), commit+":refs/heads/"+branch)
-	return err
+	return p.github.remoteGit(ctx, p.cfg.WorkDir, "push", p.github.repositoryURL(), commit+":refs/heads/"+branch)
 }

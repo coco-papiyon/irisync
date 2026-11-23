@@ -259,7 +259,7 @@ func (p *poller) publishFix(ctx context.Context, item projectIssue, pr pullDetai
 		if _, err := gitOutput(ctx, p.cfg.WorkDir, "merge-base", "--is-ancestor", fix.head, fix.commit); err != nil {
 			return fmt.Errorf("correction is not a fast-forward update: %w", err)
 		}
-		if _, err := gitOutput(ctx, p.cfg.WorkDir, "push", p.github.repositoryURL(), fix.commit+":refs/heads/"+fresh.Head.Ref); err != nil {
+		if err := p.github.remoteGit(ctx, p.cfg.WorkDir, "push", p.github.repositoryURL(), fix.commit+":refs/heads/"+fresh.Head.Ref); err != nil {
 			return err
 		}
 	}
