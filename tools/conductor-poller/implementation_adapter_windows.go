@@ -57,8 +57,19 @@ func runImplementationStep(step, manifestPath string) (stepErr error) {
 
 func (m implementationManifest) checkWorktree() error {
 	root, err := gitOutput(context.Background(), m.Worktree, "rev-parse", "--show-toplevel")
-	if err != nil || !strings.EqualFold(filepath.Clean(string(root)), filepath.Clean(m.Worktree)) {
-		return fmt.Errorf("implementation worktree is missing or changed")
+	if err != nil {
+		return fmt.Errorf("identify implementation worktree: %w", err)
+	}
+	want, err := os.Stat(m.Worktree)
+	if err != nil {
+		return err
+	}
+	got, err := os.Stat(string(root))
+	if err != nil {
+		return fmt.Errorf("read Git worktree root: %w", err)
+	}
+	if !want.IsDir() || !os.SameFile(want, got) {
+		return fmt.Errorf("implementation worktree root differs from Git root")
 	}
 	branch, err := gitOutput(context.Background(), m.Worktree, "symbolic-ref", "--short", "HEAD")
 	if err != nil || string(branch) != m.Branch {
