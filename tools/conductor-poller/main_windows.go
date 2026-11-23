@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"sync"
 	"time"
 )
@@ -58,6 +57,14 @@ func run(ctx context.Context, configPath string, once bool) error {
 	if err != nil {
 		return err
 	}
+	gh, err := newGitHubProject(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if err := gh.resolveProjectID(ctx); err != nil {
+		return err
+	}
+	cfg = gh.cfg
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return err
 	}
@@ -66,7 +73,6 @@ func run(ctx context.Context, configPath string, once bool) error {
 		return err
 	}
 	defer closeState()
-	gh := githubProject{cfg: cfg}
 	conductor, err := newConductor(cfg)
 	if err != nil {
 		return err
@@ -83,6 +89,7 @@ type poller struct {
 	slots         chan struct{}
 	designMu      sync.Mutex
 	activeDesigns map[string]bool
+	nextItem      int
 }
 
 func (p *poller) loop(ctx context.Context, once bool) error {
@@ -121,15 +128,27 @@ func (p *poller) poll(ctx context.Context) error {
 	}
 	promoted, promotionErr := p.github.promotePending(ctx, items)
 	started, eligible := 0, 0
-	for _, item := range items {
+	start := p.nextItem
+	for offset := range items {
+		index := (start + offset) % len(items)
+		item := items[index]
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 		if !p.github.runnable(item) {
 			continue
 		}
+		if p.cfg.AutoReady && item.Status != "Ready" {
+			tracked, err := p.db.tracksIssue(ctx, item)
+			if err != nil {
+				return err
+			}
+			if !tracked {
+				continue
+			}
+		}
 		eligible++
-		if item.Status == "Design Review" && !slices.Contains(p.cfg.ImplementationIssueNumbers, item.Number) {
+		if item.Status == "Design Review" && !p.cfg.implementationEnabled(item.Number) {
 			p.designMu.Lock()
 			active := p.activeDesigns[item.ID]
 			p.designMu.Unlock()
@@ -145,25 +164,29 @@ func (p *poller) poll(ctx context.Context) error {
 		default:
 			continue
 		}
-		if slices.Contains(p.cfg.DesignIssueNumbers, item.Number) {
+		if p.cfg.designEnabled(item.Number) {
 			if !p.launchDesign(ctx, item) {
 				<-p.slots
-			} else {
-				started++
+				continue
 			}
-			continue
-		}
-		runID, err := p.db.claim(ctx, item, p.cfg.MaxAttempts)
-		if err != nil || runID == 0 {
-			<-p.slots
-			if err != nil {
-				return err
+		} else {
+			runID, err := p.db.claim(ctx, item, p.cfg.MaxAttempts)
+			if err != nil || runID == 0 {
+				<-p.slots
+				if err != nil {
+					return err
+				}
+				continue
 			}
-			continue
+			p.workers.Add(1)
+			go p.execute(ctx, item, runID)
 		}
 		started++
-		p.workers.Add(1)
-		go p.execute(ctx, item, runID)
+		// Rotate the starting point so a review that needs repeated polling
+		// cannot take the only worker slot every cycle.
+		if p.cfg.AutoReady {
+			p.nextItem = (index + 1) % len(items)
+		}
 	}
 	slog.Info("project polled", "ready", eligible, "started", started, "promoted", promoted)
 	return promotionErr

@@ -80,3 +80,70 @@ func TestConductorJobExitAndCancellation(t *testing.T) {
 		t.Fatalf("expected Job Object timeout, got %v", err)
 	}
 }
+
+func TestAutoReadySelection(t *testing.T) {
+	cfg := config{Repository: "owner/irisync", AutoReady: true, TestIssueNumbers: []int{6}}
+	g := githubProject{cfg: cfg}
+	item := projectIssue{Number: 29, Status: "Ready", Repository: cfg.Repository}
+	if !g.runnable(item) || !cfg.designEnabled(item.Number) || !cfg.implementationEnabled(item.Number) {
+		t.Fatal("Ready issue requires a per-issue entry in auto_ready mode")
+	}
+	if cfg.designEnabled(6) || cfg.implementationEnabled(6) {
+		t.Fatal("smoke issue was also selected for production work")
+	}
+	item.Number = 6
+	if !g.runnable(item) {
+		t.Fatal("Ready smoke issue was not selected")
+	}
+	item.Number = 29
+	item.Status = "Pending"
+	if g.runnable(item) {
+		t.Fatal("Pending issue was selected before promotion")
+	}
+	item.Status = "Ready"
+	item.Closed = true
+	if g.runnable(item) {
+		t.Fatal("closed Ready issue was selected")
+	}
+	item.Closed = false
+	item.Repository = "owner/another"
+	if g.runnable(item) {
+		t.Fatal("issue from another repository was selected")
+	}
+	item.Repository = cfg.Repository
+	g.cfg.AutoReady = false
+	if g.runnable(item) {
+		t.Fatal("existing explicit mode selected an issue without an entry")
+	}
+}
+
+func TestAutoReadyResumesOnlyRecordedWork(t *testing.T) {
+	ctx := context.Background()
+	state, closeState, err := openState(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeState()
+	if _, err := state.db.Exec("INSERT INTO designs(issue_id) VALUES ('known')"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := state.db.Exec("INSERT INTO implementations(issue_id, design_sha, base_sha, pr_number) VALUES ('published', 'design', 'base', 85)"); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id, status string
+		want       bool
+	}{
+		{"unknown", "Design Review", false},
+		{"known", "Design Review", true},
+		{"known", "Implementing", true},
+		{"known", "Blocked", false},
+		{"published", "PR Review", true},
+		{"published", "Blocked", true},
+	} {
+		got, err := state.tracksIssue(ctx, projectIssue{ID: tc.id, Status: tc.status})
+		if err != nil || got != tc.want {
+			t.Errorf("%s %s: tracked=%t, err=%v", tc.id, tc.status, got, err)
+		}
+	}
+}

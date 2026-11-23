@@ -237,8 +237,7 @@ func (p *poller) fetchReviewCommit(ctx context.Context, sha string) error {
 	if _, err := p.github.automationIdentity(ctx); err != nil {
 		return err
 	}
-	_, err := gitOutput(ctx, p.cfg.WorkDir, "fetch", "--no-tags", p.github.repositoryURL(), sha)
-	return err
+	return p.github.remoteGit(ctx, p.cfg.WorkDir, "fetch", "--no-tags", p.github.repositoryURL(), sha)
 }
 
 func (p *poller) reviewDirectory(number int, step string) (string, error) {

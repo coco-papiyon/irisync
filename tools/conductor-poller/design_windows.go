@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -39,7 +38,7 @@ func (p *poller) launchDesign(ctx context.Context, item projectIssue) bool {
 		advance := p.advanceDesign
 		if isReviewStatus(item.Status) {
 			advance = p.advancePRReview
-		} else if slices.Contains(p.cfg.ImplementationIssueNumbers, item.Number) &&
+		} else if p.cfg.implementationEnabled(item.Number) &&
 			(item.Status == "Design Review" || item.Status == "Implementing") {
 			advance = p.advanceImplementation
 		}
@@ -96,7 +95,7 @@ func (p *poller) advanceDesign(ctx context.Context, item projectIssue) error {
 	if err != nil {
 		return err
 	}
-	if _, err := p.reviewRequest(ctx, item, p.requestBody(path, ref.Head, version)); err != nil {
+	if _, err := p.reviewRequest(ctx, item, p.requestBody(path, ref.Head, version), ref.Head); err != nil {
 		return err
 	}
 	return p.github.setDesignStatus(ctx, item, "Design Review")
@@ -184,7 +183,7 @@ func (p *poller) reviewDesign(ctx context.Context, item projectIssue, branch, pa
 		return err
 	}
 	request := p.requestBody(path, ref.Head, version)
-	comments, err := p.reviewRequest(ctx, item, request)
+	comments, err := p.reviewRequest(ctx, item, request, ref.Head)
 	if err != nil {
 		return err
 	}
@@ -212,22 +211,30 @@ func (p *poller) saveApproval(ctx context.Context, issueID, sha string, comment 
 	return err
 }
 
+const designApprovalCommand = "/approve-design"
+
 func (p *poller) requestBody(path, sha string, version int) string {
-	return fmt.Sprintf("第%d版の設計承認をお願いします。\n\n[設計書](https://github.com/%s/blob/%s/%s)\n\n承認する場合、Issueに次の1行をコメントしてください。\n\n%s", version, p.cfg.Repository, sha, path, "/approve-design "+sha)
+	return fmt.Sprintf("第%d版の設計承認をお願いします。\n\n[設計書](https://github.com/%s/blob/%s/%s)\n\n承認する場合、Issueに次の1行をコメントしてください。\n\n%s", version, p.cfg.Repository, sha, path, designApprovalCommand)
 }
 
-func (p *poller) reviewRequest(ctx context.Context, item projectIssue, body string) ([]designComment, error) {
+func (p *poller) reviewRequest(ctx context.Context, item projectIssue, body, sha string) ([]designComment, error) {
 	comments, err := p.github.comments(ctx, item.Number)
 	if err != nil {
 		return nil, err
 	}
 	for _, comment := range comments {
-		if strings.EqualFold(comment.User.Login, p.cfg.GitHubLogin) && comment.Body == body {
+		if matchesDesignRequest(comment, p.cfg, body, sha) {
 			return comments, nil
 		}
 	}
 	err = p.github.mutate(ctx, "POST", fmt.Sprintf("repos/%s/issues/%d/comments", p.cfg.Repository, item.Number), map[string]string{"body": body})
 	return comments, err
+}
+
+func matchesDesignRequest(comment designComment, cfg config, request, sha string) bool {
+	// Preserve requests posted before the SHA was removed from the command.
+	return strings.EqualFold(comment.User.Login, cfg.GitHubLogin) &&
+		(comment.Body == request || comment.Body == request+" "+sha)
 }
 
 func findApproval(comments []designComment, cfg config, request, sha string) designComment {
@@ -236,7 +243,7 @@ func findApproval(comments []designComment, cfg config, request, sha string) des
 	}
 	var requestID int64
 	for _, c := range comments {
-		if c.Body == request && strings.EqualFold(c.User.Login, cfg.GitHubLogin) && c.ID > requestID {
+		if c.ID > requestID && matchesDesignRequest(c, cfg, request, sha) {
 			requestID = c.ID
 		}
 	}
@@ -245,9 +252,10 @@ func findApproval(comments []designComment, cfg config, request, sha string) des
 		return result
 	}
 	for _, c := range comments {
-		if c.ID > requestID && c.ID > result.ID && c.CreatedAt.Equal(c.UpdatedAt) && c.User.Type == "User" &&
-			!strings.EqualFold(c.User.Login, cfg.GitHubLogin) && slices.Contains(cfg.DesignApproverIDs, c.User.ID) &&
-			strings.TrimSpace(c.Body) == "/approve-design "+sha {
+		body := strings.TrimSpace(c.Body)
+		if c.ID > requestID && c.ID > result.ID && c.CreatedAt.Equal(c.UpdatedAt) &&
+			authorizedHuman(cfg, c.User.ID, c.User.Login, c.User.Type) &&
+			(body == designApprovalCommand || body == designApprovalCommand+" "+sha) {
 			result = c
 		}
 	}

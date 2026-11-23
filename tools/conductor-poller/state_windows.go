@@ -112,6 +112,16 @@ func openState(ctx context.Context, dir string) (*state, func(), error) {
 	return &state{db}, closeState, nil
 }
 
+func (s *state) tracksIssue(ctx context.Context, item projectIssue) (bool, error) {
+	query := "SELECT EXISTS (SELECT 1 FROM designs WHERE issue_id = ?)"
+	if isReviewStatus(item.Status) {
+		query = "SELECT EXISTS (SELECT 1 FROM implementations WHERE issue_id = ? AND pr_number != 0)"
+	}
+	var tracked bool
+	err := s.db.QueryRowContext(ctx, query, item.ID).Scan(&tracked)
+	return tracked, err
+}
+
 func (s *state) claim(ctx context.Context, issue projectIssue, maxAttempts int) (int64, error) {
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
