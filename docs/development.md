@@ -16,7 +16,7 @@ GitHub Actionsの `Conductor smoke (Windows)` も同じスクリプトを実行�
 
 Irisyncは `coco-papiyon` が所有する非公開の [Project #4](https://github.com/users/coco-papiyon/projects/4) を使う。`Status` の定義、権限を確認するコマンド、検証用Issueの更新方法は[Conductor検討書](design/conductor-feasibility-study.md#45-github-cliの認証と起動前確認)を参照する。
 
-Projectの所有者は **… → Workflows** を開き、`Item closed`、`Pull request merged`、`Pull request linked to issue`、`Auto-close issue` を無効にする。`Item added to project` は移行先を `Backlog` に設定する。サブIssueの自動追加を使う場合も `Backlog` に入ることを確認する。開始は運用者が `Ready` に変更した時点、完了はPollerが対応するPRのマージを確認した時点とする。 [GitHub Projectsの組み込み自動化](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-built-in-automations)
+Projectの所有者は **… → Workflows** を開き、`Item closed`、`Pull request merged`、`Pull request linked to issue`、`Auto-close issue` を無効にする。`Item added to project` は移行先を `Backlog` に設定する。サブIssueの自動追加を使う場合も `Backlog` に入ることを確認する。運用者の操作または前提完了の判定で `Ready` に移り、Pollerが対応するPRのマージを確認すると `Done` に移る。 [GitHub Projectsの組み込み自動化](https://docs.github.com/en/issues/planning-and-tracking-with-projects/automating-your-project/using-the-built-in-automations)
 
 リポジトリ所有者は、人間の設計承認・マージに使うアカウントと、Conductor実行用のGitHubアカウントを決める。実行用アカウントは対象リポジトリで作業ブランチをpushしてPRを操作できる権限と、Project #4の **Settings → Manage access → Write** を持たせる。実行用アカウントの認証は、専用実行ユーザーのPowerShellで行う。
 
@@ -39,7 +39,7 @@ gh project view 4 --owner coco-papiyon --format json --jq '.title'
 
 ## Polling Controllerの試運転
 
-Projectの読み取り、SQLiteへの実行履歴の保存、Conductorのスモークワークフロー起動を試せる。設定例は対象Issueを空にしているため、既存Issueの処理を開始せずにGitHub接続だけを確認できる。
+Projectの読み取り、SQLiteへの実行履歴の保存、Conductorのスモークワークフロー起動を試せる。設定例ではConductorを起動するIssueを空にしている。`Pending` の前提完了判定と `Ready` への更新は動作する。
 
 ```powershell
 Push-Location tools/conductor-poller
@@ -55,7 +55,7 @@ Conductorまで試すときは `.conductor/poller.example.yaml` を `.conductor/
 
 ## Codexによる設計と承認
 
-Conductorを実行するWindowsユーザーで `codex login status` を確認する。`poller.local.yaml` の `design_issue_numbers` に設計対象のIssue番号を入れ、`design_approver_ids` に承認者のGitHub数値IDを設定する。`gh api users/coco-papiyon --jq .id` で所有者のIDを確認できる。対象IssueはProjectの `Ready` に移す。設定例の空リストでは、Issue情報のCodex送信やGitHubへの書き込みは発生しない。
+Conductorを実行するWindowsユーザーで `codex login status` を確認する。`poller.local.yaml` の `design_issue_numbers` に設計対象のIssue番号を入れ、`design_approver_ids` に承認者のGitHub数値IDを設定する。`gh api users/coco-papiyon --jq .id` で所有者のIDを確認できる。対象IssueはProjectの `Ready` に移す。前提があるIssueは本文と `Blocked by` に前提を登録して `Pending` にすると、すべての前提が `Done` になった次のポーリングで自動的に `Ready` へ移る。設定例の空リストでは、Issue情報をCodexへ送信しない。 [前提Issueの判定仕様](design/conductor-feasibility-study.md#54-前提issueとpendingの判定)
 
 Polling Controllerは、Issue情報とローカルの設計文書をCodex CLIに渡してMarkdownを生成する。実行時はレビュー済みブランチのチェックアウトを使い、Issue本文には設計に必要な公開情報だけを記載する。設計書は `conductor/design/issue-N` ブランチの `docs/design/issues/issue-N.md` に保存され、Issueにコミット固定リンクと承認コマンドが表示される。
 

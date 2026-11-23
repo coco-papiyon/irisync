@@ -154,7 +154,7 @@ func (g githubProject) publishDesign(ctx context.Context, branch, path, markdown
 func (g githubProject) setDesignStatus(ctx context.Context, item projectIssue, target string) error {
 	query := `query($project:ID!,$item:ID!){
 		viewer{login}
-		item:node(id:$item){...on ProjectV2Item{isArchived,fieldValueByName(name:"Status"){...on ProjectV2ItemFieldSingleSelectValue{name}},content{...on Issue{id closed}}}}
+		item:node(id:$item){...on ProjectV2Item{isArchived,project{id},fieldValueByName(name:"Status"){...on ProjectV2ItemFieldSingleSelectValue{name}},content{...on Issue{id closed}}}}
 		project:node(id:$project){...on ProjectV2{field(name:"Status"){...on ProjectV2SingleSelectField{id options{id name}}}}}
 	}`
 	var response struct {
@@ -162,6 +162,7 @@ func (g githubProject) setDesignStatus(ctx context.Context, item projectIssue, t
 			Viewer struct{ Login string }
 			Item   struct {
 				IsArchived       bool
+				Project          struct{ ID string }
 				FieldValueByName struct{ Name string }
 				Content          struct {
 					ID     string
@@ -180,7 +181,7 @@ func (g githubProject) setDesignStatus(ctx context.Context, item projectIssue, t
 		return err
 	}
 	data := response.Data
-	if !strings.EqualFold(data.Viewer.Login, g.cfg.GitHubLogin) || data.Item.IsArchived ||
+	if !strings.EqualFold(data.Viewer.Login, g.cfg.GitHubLogin) || data.Item.IsArchived || data.Item.Project.ID != g.cfg.ProjectID ||
 		data.Item.Content.ID != item.ID || data.Item.Content.Closed && target != "Done" {
 		return fmt.Errorf("issue changed before updating Status")
 	}
