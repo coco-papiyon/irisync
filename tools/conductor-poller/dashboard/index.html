@@ -46,7 +46,7 @@
       </header>
       <p id="issues-message" class="message" hidden></p>
       <div class="table-wrap"><table>
-        <thead><tr><th scope="col">件名</th><th scope="col">Project ステータス</th></tr></thead>
+        <thead><tr><th scope="col">件名</th><th scope="col">Project ステータス</th><th scope="col">実行中の処理</th><th scope="col">直近の実行結果</th></tr></thead>
         <tbody id="issues-body"></tbody>
       </table></div>
     </section>
@@ -101,11 +101,13 @@
     <header class="dialog-header">
       <h2 id="item-title"></h2>
       <div id="item-actions" class="filters">
+        <button id="item-retry" class="primary-action" type="button" hidden>実装を再開</button>
         <a id="item-github" class="refresh" target="_blank" rel="noopener noreferrer">GitHub で開く</a>
         <button id="item-close" class="refresh" type="button">閉じる</button>
       </div>
     </header>
     <div id="item-status" class="item-status"></div>
+    <p id="item-retry-note" class="message" role="status" hidden></p>
     <div class="detail-body">
       <section aria-labelledby="item-discussion-title">
         <div class="discussion-header">
@@ -127,6 +129,14 @@
         <tbody id="item-results-body"></tbody>
       </table></div>
     </div>
+  </dialog>
+  <dialog id="feedback-dialog" class="detail-dialog" aria-labelledby="feedback-title">
+    <header class="dialog-header">
+      <h2 id="feedback-title">AI レビュー結果</h2>
+      <button id="feedback-close" class="refresh" type="button">閉じる</button>
+    </header>
+    <p id="feedback-context" class="feedback-context"></p>
+    <div id="feedback-content" class="feedback-content" tabindex="0"></div>
   </dialog>
   <dialog id="log-dialog" aria-labelledby="log-title">
     <header class="dialog-header">

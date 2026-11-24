@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"slices"
 	"strings"
+	"time"
 )
 
 const projectQuery = `query($id:ID!, $after:String) {
@@ -21,7 +22,7 @@ const projectQuery = `query($id:ID!, $after:String) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
-            ... on Issue { id number title closed repository { nameWithOwner } }
+            ... on Issue { id number title closed updatedAt repository { nameWithOwner } }
           }
         }
       }
@@ -86,6 +87,7 @@ type projectIssue struct {
 	ID, ItemID, Repository, Status, Title string
 	Number                                int
 	Closed, Archived                      bool
+	UpdatedAt                             time.Time
 }
 
 type projectPage struct {
@@ -105,6 +107,7 @@ type projectPage struct {
 					Number     int
 					Title      string
 					Closed     bool
+					UpdatedAt  time.Time
 					Repository struct{ NameWithOwner string }
 				}
 			}
@@ -146,7 +149,7 @@ func (g githubProject) projectIssues(ctx context.Context) ([]projectIssue, error
 			}
 			issues = append(issues, projectIssue{
 				ID: issue.ID, ItemID: item.ID, Number: issue.Number, Title: issue.Title, Status: item.FieldValueByName.Name,
-				Repository: issue.Repository.NameWithOwner, Closed: issue.Closed, Archived: item.IsArchived,
+				Repository: issue.Repository.NameWithOwner, Closed: issue.Closed, Archived: item.IsArchived, UpdatedAt: issue.UpdatedAt,
 			})
 		}
 		if !items.PageInfo.HasNextPage {

@@ -8,6 +8,7 @@ const labels = {
   APPROVED: "承認済み", CHANGES_REQUESTED: "修正依頼あり", REVIEW_REQUIRED: "レビュー待ち",
   COMMENTED: "コメント", DISMISSED: "レビュー取消",
   smoke: "スモークテスト", design: "設計", implementation: "実装", review: "レビュー",
+  "implementation attempt": "実装の試行", "pr fix": "PR 修正", "merge check": "マージ状況の確認",
   running: "実行中", succeeded: "成功", failed: "失敗", interrupted: "中断", timed_out: "タイムアウト",
   approved: "承認済み", validated: "ローカル検証済み", published: "PR 作成済み",
   "awaiting approval": "設計承認待ち", "changes requested": "修正が必要", recorded: "試行を記録済み"
@@ -17,11 +18,13 @@ const bad = new Set(["Blocked", "FAILURE", "ERROR", "CHANGES_REQUESTED", "failed
 const wait = new Set(["Pending", "Design Review", "PR Review", "REVIEW_REQUIRED", "EXPECTED", "awaiting approval"]);
 const active = new Set(["Ready", "Designing", "Implementing", "PR Fixing", "Merge Ready", "OPEN", "PENDING", "running"]);
 let snapshot;
+let resultsByIssue = new Map();
 let logRequest = 0;
 let selectedItem;
 let approval;
 let discussionRequest = 0;
 let sendingApproval = false;
+let sendingRetry = false;
 let settingsRevision;
 let settingsRequest = 0;
 let savingSettings = false;
@@ -53,6 +56,7 @@ function itemButton(kind, item) {
   if (item.Title) element.prepend(node("span", "#" + item.Number, "issue-number"));
   element.addEventListener("click", () => {
     selectedItem = { kind, number: item.Number };
+    message("item-retry-note", "");
     if (renderItemDetail()) {
       byId("item-dialog").showModal();
       loadDiscussion();
@@ -105,8 +109,62 @@ function renderIssues() {
   if (statuses.includes(selected)) select.value = selected;
   const filtered = issues.filter((issue) => (!select.value || issue.Status === select.value) &&
     ("#" + issue.Number + " " + issue.Title).toLowerCase().includes(key));
-  fillTable("issues", filtered.map((issue) => [itemButton("issue", issue), badge(issue.Status)]),
-    2, "表示する Issue はありません");
+  filtered.sort((a, b) => (Date.parse(b.UpdatedAt) || 0) - (Date.parse(a.UpdatedAt) || 0) || b.Number - a.Number);
+  fillTable("issues", filtered.map((issue) => {
+    const results = resultsByIssue.get(issue.Number) || [];
+    return [
+      itemButton("issue", issue), badge(issue.Status),
+      issueResultSummary(results.find((result) => result.Outcome === "running")),
+      issueResultSummary(results.find((result) => result.Outcome !== "running"), true)
+    ];
+  }), 4, "表示する Issue はありません");
+}
+
+function groupIssueResults(data) {
+  const issueNumbersByPR = new Map((data.PRs || []).map((pr) => [pr.Number, pr.Issues || []]));
+  const grouped = new Map();
+  for (const result of data.Results || []) {
+    const numbers = new Set([result.Issue, ...(issueNumbersByPR.get(result.PR) || [])]);
+    for (const number of numbers) {
+      if (!number) continue;
+      if (!grouped.has(number)) grouped.set(number, []);
+      grouped.get(number).push(result);
+    }
+  }
+  for (const results of grouped.values()) {
+    results.sort((a, b) => (Date.parse(b.Timestamp) || 0) - (Date.parse(a.Timestamp) || 0));
+  }
+  return grouped;
+}
+
+function issueResultSummary(result, showTimestamp = false) {
+  if (!result) return node("span", "—", "empty");
+  const summary = node("div", undefined, "issue-result");
+  const phase = labels[result.Phase] || result.Phase;
+  summary.append(node("span", result.Attempts ? phase + " " + result.Attempts + "回目" : phase), badge(result.Outcome));
+  if (result.Feedback) summary.append(feedbackButton(result));
+  if (showTimestamp && result.Timestamp) {
+    summary.append(node("span", timeText(result.Timestamp), "result-time"));
+  }
+  if (result.LogPath) summary.append(logButton(result.LogPath, "ログ"));
+  return summary;
+}
+
+function feedbackButton(result) {
+  const button = node("button", "AI レビュー結果", "log-link");
+  button.type = "button";
+  button.addEventListener("click", () => {
+    const context = [
+      result.Issue ? "Issue #" + result.Issue : "",
+      result.PR ? "PR #" + result.PR : "",
+      labels[result.Phase] || result.Phase,
+      result.Attempts ? result.Attempts + "回目" : ""
+    ].filter(Boolean);
+    byId("feedback-context").textContent = context.join(" · ");
+    byId("feedback-content").textContent = result.Feedback;
+    byId("feedback-dialog").showModal();
+  });
+  return button;
 }
 
 function logButton(path, label) {
@@ -122,8 +180,11 @@ function resultRow(result) {
   if (result.Issue) target.append(link("Issue #" + result.Issue, origin + "/issues/" + result.Issue));
   if (result.Issue && result.PR) target.append(" / ");
   if (result.PR) target.append(link("PR #" + result.PR, origin + "/pull/" + result.PR));
-  const phase = result.Phase === "implementation attempt" ? "実装の試行" : labels[result.Phase];
-  return [phase, target.firstChild ? target : "—", badge(result.Outcome), result.Attempts || "—",
+  const phase = labels[result.Phase] || result.Phase;
+  const outcome = node("div", undefined, "result-outcome");
+  outcome.append(badge(result.Outcome));
+  if (result.Feedback) outcome.append(feedbackButton(result));
+  return [phase, target.firstChild ? target : "—", outcome, result.Attempts || "—",
     timeText(result.Timestamp), result.LogPath ? logButton(result.LogPath, "開く") : "—"];
 }
 
@@ -139,6 +200,9 @@ function renderItemDetail() {
   }
   byId("item-title").textContent = (kind === "issue" ? "Issue" : "PR") + " #" + number + " " + item.Title;
   byId("item-github").href = item.URL;
+  const retry = byId("item-retry");
+  retry.hidden = kind !== "issue" || item.Status !== "Blocked" || !item.Retry;
+  retry.disabled = sendingRetry;
   byId("item-discussion-title").textContent = kind === "issue" ? "GitHub のコメント" : "GitHub のコメント・レビュー";
   const status = byId("item-status");
   if (kind === "issue") {
@@ -149,16 +213,44 @@ function renderItemDetail() {
       status.append(link("関連 Issue #" + issue, "https://github.com/" + snapshot.Repository + "/issues/" + issue));
     }
   }
-  const matches = (entry) => {
-    if (kind === "issue") {
-      return entry.Issue === number || (entry.PR > 0 && prs.some((pr) => pr.Number === entry.PR && pr.Issues?.includes(number)));
-    }
-    return entry.PR === number || (entry.PR === 0 && item.Issues?.includes(entry.Issue) &&
-      ["design", "smoke"].includes(entry.Phase));
-  };
+  const results = kind === "issue" ? resultsByIssue.get(number) || [] : (snapshot.Results || []).filter((entry) =>
+    entry.PR === number || (entry.PR === 0 && item.Issues?.includes(entry.Issue) && ["design", "smoke"].includes(entry.Phase)));
   message("item-results-message", [snapshot.Errors.results, snapshot.Errors.logs].filter(Boolean).join(" "));
-  fillTable("item-results", (snapshot.Results || []).filter(matches).map(resultRow), 6, "関連する実行結果はありません");
+  fillTable("item-results", results.map(resultRow), 6, "関連する実行結果はありません");
   return true;
+}
+
+async function retryImplementation() {
+  const target = selectedItem;
+  if (sendingRetry || target?.kind !== "issue") return;
+  const item = (snapshot.Issues || []).find((issue) => issue.Number === target.number);
+  if (item?.Status !== "Blocked" || !item.Retry) return;
+  if (!window.confirm("Issue #" + item.Number + " の実装を再開しますか？")) return;
+  const button = byId("item-retry");
+  sendingRetry = true;
+  button.disabled = true;
+  message("item-retry-note", "実装の再開を登録しています…");
+  try {
+    const response = await fetch("/api/retry-implementation", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ Number: item.Number, ...item.Retry })
+    });
+    if (!response.ok) {
+      const data = await response.json();
+      throw new Error(data.Message || "実装を再開できませんでした。");
+    }
+    delete item.Retry;
+    if (selectedItem === target) {
+      button.hidden = true;
+      message("item-retry-note", "再開を登録しました。次のポーリングで実装を続けます。");
+    }
+    refresh();
+  } catch (error) {
+    if (selectedItem === target) message("item-retry-note", error.message);
+  } finally {
+    sendingRetry = false;
+    button.disabled = false;
+  }
 }
 
 function commentBody(text) {
@@ -363,9 +455,11 @@ async function openLog(path) {
 
 function renderDashboard(data) {
   snapshot = data;
+  resultsByIssue = groupIssueResults(data);
   byId("repository").textContent = data.Repository;
   byId("last-updated").textContent = "更新 " + timeText(data.Updated) + (data.ViewingOnly ? " ・ダッシュボードのみ起動中" : "");
-  for (const section of ["issues", "prs"]) message(section + "-message", data.Errors[section]);
+  message("issues-message", [data.Errors.issues, data.Errors.results, data.Errors.logs].filter(Boolean).join(" "));
+  message("prs-message", data.Errors.prs);
   const issues = data.Issues || [];
   const prs = data.PRs || [];
   byId("metric-open").textContent = data.Errors.issues ? "—" : issues.filter((issue) => issue.Status !== "Done").length;
@@ -407,12 +501,14 @@ byId("status-filter").addEventListener("change", renderIssues);
 byId("item-close").addEventListener("click", () => byId("item-dialog").close());
 byId("item-refresh").addEventListener("click", loadDiscussion);
 byId("item-approve").addEventListener("click", submitApproval);
+byId("item-retry").addEventListener("click", retryImplementation);
 byId("item-dialog").addEventListener("close", () => {
   selectedItem = undefined;
   approval = undefined;
   discussionRequest++;
 });
 byId("log-close").addEventListener("click", () => byId("log-dialog").close());
+byId("feedback-close").addEventListener("click", () => byId("feedback-dialog").close());
 refresh();
 window.setInterval(() => {
   if (!document.hidden) refresh();

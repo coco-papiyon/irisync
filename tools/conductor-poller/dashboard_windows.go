@@ -22,6 +22,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sys/windows"
 )
 
 //go:embed dashboard/*
@@ -115,6 +117,9 @@ func (d dashboardSource) handler(host string) http.Handler {
 	mux.HandleFunc("POST /api/approve", func(w http.ResponseWriter, r *http.Request) {
 		d.approve(w, r, &writeMu)
 	})
+	mux.HandleFunc("POST /api/retry-implementation", func(w http.ResponseWriter, r *http.Request) {
+		d.retryImplementation(w, r, &writeMu)
+	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -130,6 +135,8 @@ func (d dashboardSource) handler(host string) http.Handler {
 type dashboardIssue struct {
 	Number             int
 	Title, Status, URL string
+	UpdatedAt          time.Time
+	Retry              *implementationRetry `json:",omitempty"`
 }
 
 type dashboardPR struct {
@@ -144,6 +151,7 @@ type dashboardPR struct {
 type dashboardResult struct {
 	Phase, Outcome, Timestamp string
 	LogPath                   string
+	Feedback                  string `json:",omitempty"`
 	Issue, PR, Attempts       int
 	revision                  string
 	runID                     int
@@ -169,6 +177,10 @@ func (d dashboardSource) snapshot(w http.ResponseWriter, r *http.Request) {
 		Errors: make(map[string]string),
 	}
 	projectNumbers := make(map[string]int)
+	var retries map[string]implementationRetry
+	if !d.viewingOnly {
+		retries, _ = d.implementationRetries(r.Context())
+	}
 	issues, err := d.github.projectIssues(r.Context())
 	if err != nil {
 		data.Errors["issues"] = "Project の Issue を取得できませんでした。GitHub 認証と Project へのアクセスを確認してください。"
@@ -181,10 +193,14 @@ func (d dashboardSource) snapshot(w http.ResponseWriter, r *http.Request) {
 		if issue.Closed {
 			continue
 		}
-		data.Issues = append(data.Issues, dashboardIssue{
-			Number: issue.Number, Title: issue.Title, Status: issue.Status,
+		entry := dashboardIssue{
+			Number: issue.Number, Title: issue.Title, Status: issue.Status, UpdatedAt: issue.UpdatedAt,
 			URL: fmt.Sprintf("https://github.com/%s/issues/%d", data.Repository, issue.Number),
-		})
+		}
+		if retry, ok := retries[issue.ID]; ok && retryableProjectIssue(d.github.cfg, issue) {
+			entry.Retry = &retry
+		}
+		data.Issues = append(data.Issues, entry)
 	}
 	if data.PRs, err = d.pullRequests(r.Context()); err != nil {
 		data.Errors["prs"] = "GitHub から PR と CI の状況を取得できませんでした。"
@@ -192,11 +208,16 @@ func (d dashboardSource) snapshot(w http.ResponseWriter, r *http.Request) {
 	if data.Results, err = d.results(r.Context(), projectNumbers); err != nil {
 		data.Errors["results"] = "ローカルの実行結果を読み取れませんでした。"
 	}
+	active, err := d.activeResults(r.Context())
+	if err != nil {
+		data.Errors["results"] = "実行中の処理を読み取れませんでした。"
+	}
 	logs, err := dashboardLogs(d.github.cfg.DataDir)
 	if err != nil {
 		data.Errors["logs"] = "一部の実行ログを確認できませんでした。"
 	}
 	data.Results = append(dashboardAttemptResults(d.github.cfg.DataDir, logs), data.Results...)
+	data.Results = append(active, data.Results...)
 	connectDashboardRecords(data.PRs, data.Results, logs)
 	dashboardJSON(w, data)
 }
@@ -273,22 +294,25 @@ func (d dashboardSource) pullRequests(ctx context.Context) ([]dashboardPR, error
 
 func (d dashboardSource) results(ctx context.Context, numbers map[string]int) ([]dashboardResult, error) {
 	rows, err := d.db.QueryContext(ctx, `
-		SELECT phase, issue_id, issue_number, pr_number, outcome, attempts, timestamp, revision, run_id FROM (
+		SELECT phase, issue_id, issue_number, pr_number, outcome, attempts, timestamp, revision, run_id, feedback FROM (
 			SELECT 'smoke' AS phase, issue_id, issue_number, 0 AS pr_number, outcome,
-				0 AS attempts, COALESCE(finished_at, started_at) AS timestamp, '' AS revision, id AS run_id FROM smoke_runs
+				0 AS attempts, COALESCE(finished_at, started_at) AS timestamp, '' AS revision, id AS run_id, rowid AS record_order, '' AS feedback
+				FROM smoke_runs WHERE outcome <> 'running' OR NOT EXISTS (
+					SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'active_workflows'
+				)
 			UNION ALL
 			SELECT 'design', issue_id, 0, 0,
 				CASE WHEN approved_sha <> '' THEN 'approved' WHEN revision <> '' THEN 'awaiting approval' ELSE 'recorded' END,
-				attempts, '', revision, 0 FROM designs
+				attempts, '', revision, 0, rowid, '' FROM designs
 			UNION ALL
 			SELECT 'implementation', issue_id, 0, pr_number,
 				CASE WHEN pr_number <> 0 THEN 'published' WHEN commit_sha <> '' THEN 'validated' ELSE 'recorded' END,
-				attempts, '', design_sha, 0 FROM implementations
+				attempts, '', design_sha, 0, rowid, '' FROM implementations
 			UNION ALL
 			SELECT 'review', '', 0, pr_number,
-				CASE WHEN approved THEN 'approved' ELSE 'changes requested' END, 0, '', head_sha || '-' || base_sha, 0
+				CASE WHEN approved THEN 'approved' ELSE 'changes requested' END, 0, '', head_sha || '-' || base_sha, 0, rowid, feedback
 				FROM pr_reviews
-		) ORDER BY timestamp DESC, pr_number DESC, issue_number DESC LIMIT 250`)
+		) ORDER BY timestamp DESC, pr_number DESC, issue_number DESC, record_order DESC LIMIT 250`)
 	if err != nil {
 		return nil, err
 	}
@@ -298,18 +322,62 @@ func (d dashboardSource) results(ctx context.Context, numbers map[string]int) ([
 		var result dashboardResult
 		var id string
 		if err := rows.Scan(&result.Phase, &id, &result.Issue, &result.PR, &result.Outcome,
-			&result.Attempts, &result.Timestamp, &result.revision, &result.runID); err != nil {
+			&result.Attempts, &result.Timestamp, &result.revision, &result.runID, &result.Feedback); err != nil {
 			return nil, err
 		}
 		if result.Issue == 0 {
 			result.Issue = numbers[id]
 		}
+		result.Feedback = dashboardReviewText(result.Feedback)
 		results = append(results, result)
 	}
 	return results, rows.Err()
 }
 
-var dashboardLogPath = regexp.MustCompile(`^(?:(?:run-[0-9]+|design-[0-9]+-[0-9]+|poller(?:-[A-Za-z0-9-]+)?)(?:\.out)?\.log|implementation/[0-9]+-[0-9a-f]{40}/attempt-[0-9]+/(?:(?:edit|validation|review|workflow)\.log|step-error\.txt|review\.json)|review/[0-9]+/(?:fix-[0-9]+|review-[0-9a-f]{40}-[0-9a-f]{40}|merge-[0-9a-f]{40})/(?:(?:edit|validation|review|workflow)\.log|step-error\.txt|review\.json))$`)
+func (d dashboardSource) activeResults(ctx context.Context) ([]dashboardResult, error) {
+	// A dashboard-only process can open a database from before this table was added.
+	var exists bool
+	err := d.db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'active_workflows')").Scan(&exists)
+	if err != nil || !exists {
+		return nil, err
+	}
+	rows, err := d.db.QueryContext(ctx, "SELECT issue_number, pr_number, phase, attempt, log_path, started_at, process_id FROM active_workflows")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []dashboardResult
+	for rows.Next() {
+		result := dashboardResult{Outcome: "running"}
+		var pid uint32
+		if err := rows.Scan(&result.Issue, &result.PR, &result.Phase, &result.Attempts, &result.LogPath, &result.Timestamp, &pid); err != nil {
+			return nil, err
+		}
+		started, err := time.Parse(time.RFC3339Nano, result.Timestamp)
+		if err == nil && workflowProcessAlive(pid, started) {
+			results = append(results, result)
+		}
+	}
+	return results, rows.Err()
+}
+
+func workflowProcessAlive(pid uint32, started time.Time) bool {
+	process, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.SYNCHRONIZE, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(process)
+	status, err := windows.WaitForSingleObject(process, 0)
+	if err != nil || status != uint32(windows.WAIT_TIMEOUT) {
+		return false
+	}
+	var created, exited, kernel, user windows.Filetime
+	err = windows.GetProcessTimes(process, &created, &exited, &kernel, &user)
+	// Do not show a stale result if Windows reused the recorded PID.
+	return err == nil && !time.Unix(0, created.Nanoseconds()).After(started)
+}
+
+var dashboardLogPath = regexp.MustCompile(`^(?:(?:run-[0-9]+|design-[0-9]+-[0-9]+|poller(?:-[A-Za-z0-9-]+)?)(?:\.out)?\.log|implementation/[0-9]+-[0-9a-f]{40}/attempt-[0-9]+/(?:(?:edit|validation|review|workflow)\.log|step-error\.txt|review\.json)|review/[0-9]+/(?:fix-[0-9]+(?:/attempt-[0-9]+)?|review-[0-9a-f]{40}-[0-9a-f]{40}|merge-[0-9a-f]{40})/(?:(?:edit|validation|review|workflow)\.log|step-error\.txt|review\.json))$`)
 
 var dashboardSecrets = regexp.MustCompile(`(?is)-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----.*?-----END (?:[A-Z]+ )*PRIVATE KEY-----|\b(?:gh[opusr]_[A-Za-z0-9_.-]{15,}|github_pat_[A-Za-z0-9_]{15,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,})`)
 
@@ -326,7 +394,7 @@ func dashboardLogs(root string) ([]dashboardLog, error) {
 		name := filepath.ToSlash(rel)
 		parts := strings.Split(name, "/")
 		if entry.IsDir() {
-			if name != "." && (len(parts) > 3 || (parts[0] != "implementation" && parts[0] != "review")) {
+			if name != "." && (len(parts) > 4 || (parts[0] != "implementation" && parts[0] != "review")) {
 				return filepath.SkipDir
 			}
 			return nil
@@ -356,11 +424,26 @@ func dashboardLogs(root string) ([]dashboardLog, error) {
 func dashboardAttemptResults(root string, logs []dashboardLog) []dashboardResult {
 	available := make(map[string]bool, len(logs))
 	for _, log := range logs {
-		available[log.Path] = true
+		available[log.Path] = log.Bytes > 0
 	}
 	var results []dashboardResult
 	for _, log := range logs {
-		if log.Group != "implementation" || !strings.HasSuffix(log.Path, "/workflow.log") || log.Bytes == 0 || log.Bytes > 16<<10 {
+		if !strings.HasSuffix(log.Path, "/workflow.log") || log.Bytes == 0 || log.Bytes > 16<<10 {
+			continue
+		}
+		parts := strings.Split(log.Path, "/")
+		var result dashboardResult
+		switch {
+		case log.Group == "implementation" && len(parts) == 4:
+			number, revision, _ := strings.Cut(parts[1], "-")
+			result.Issue, _ = strconv.Atoi(number)
+			result.Attempts, _ = strconv.Atoi(strings.TrimPrefix(parts[2], "attempt-"))
+			result.Phase, result.revision = "implementation attempt", revision
+		case log.Group == "review" && len(parts) == 5 && strings.HasPrefix(parts[2], "fix-"):
+			result.PR, _ = strconv.Atoi(parts[1])
+			result.Attempts, _ = strconv.Atoi(strings.TrimPrefix(parts[3], "attempt-"))
+			result.Phase = "pr fix"
+		default:
 			continue
 		}
 		file, err := openDashboardLog(root, log.Path)
@@ -381,34 +464,49 @@ func dashboardAttemptResults(root string, logs []dashboardLog) []dashboardResult
 		edit := strings.Trim(string(stages.Edit), `"`)
 		validation := strings.Trim(string(stages.Validation), `"`)
 		review := strings.Trim(string(stages.Review), `"`)
-		outcome := "failed"
+		result.Outcome = "failed"
 		if edit == "0" && validation == "0" && review == "0" {
-			outcome = "succeeded"
+			result.Outcome = "succeeded"
 		} else if edit == "" {
 			continue
 		}
-		parts := strings.Split(log.Path, "/")
-		number, revision, _ := strings.Cut(parts[1], "-")
-		issue, _ := strconv.Atoi(number)
-		attempt, _ := strconv.Atoi(strings.TrimPrefix(parts[2], "attempt-"))
-		resultLog := log.Path
-		if failed := strings.TrimSuffix(log.Path, "workflow.log") + "step-error.txt"; outcome == "failed" && available[failed] {
-			resultLog = failed
+		directory := strings.TrimSuffix(log.Path, "workflow.log")
+		result.Timestamp = log.Modified.Format(time.RFC3339Nano)
+		result.LogPath = log.Path
+		if failed := directory + "step-error.txt"; result.Outcome == "failed" && available[failed] {
+			result.LogPath = failed
 		}
-		results = append(results, dashboardResult{
-			Phase: "implementation attempt", Outcome: outcome, Timestamp: log.Modified.Format(time.RFC3339Nano),
-			LogPath: resultLog, Issue: issue, Attempts: attempt, revision: revision,
-		})
+		if _, err := strconv.Atoi(review); err == nil {
+			result.Feedback = dashboardReviewFeedback(root, directory+"review.json")
+		}
+		results = append(results, result)
 	}
 	return results
+}
+
+func dashboardReviewFeedback(root, path string) string {
+	file, err := openDashboardLog(root, path)
+	if err != nil {
+		return ""
+	}
+	defer file.Close()
+	var review reviewVerdict
+	if err := json.NewDecoder(io.LimitReader(file, 64<<10)).Decode(&review); err != nil {
+		return ""
+	}
+	return dashboardReviewText(review.Feedback)
+}
+
+func dashboardReviewText(feedback string) string {
+	return strings.TrimSpace(boundedReviewText(dashboardSecrets.ReplaceAllString(feedback, "[redacted]")))
 }
 
 func connectDashboardRecords(prs []dashboardPR, results []dashboardResult, logs []dashboardLog) {
 	issueByPR := make(map[int]int)
 	prByRevision := make(map[string]int)
-	available := make(map[string]bool, len(logs))
+	available := make(map[string]dashboardLog, len(logs))
 	for _, log := range logs {
-		available[log.Path] = true
+		available[log.Path] = log
 	}
 	for _, result := range results {
 		if result.PR == 0 || result.Phase != "implementation" {
@@ -435,6 +533,12 @@ func connectDashboardRecords(prs []dashboardPR, results []dashboardResult, logs 
 	}
 	for i := range results {
 		result := &results[i]
+		if result.Outcome == "running" {
+			if available[result.LogPath].Bytes == 0 {
+				result.LogPath = ""
+			}
+			continue
+		}
 		if result.Phase == "implementation attempt" {
 			result.PR = prByRevision[result.revision]
 		}
@@ -450,8 +554,15 @@ func connectDashboardRecords(prs []dashboardPR, results []dashboardResult, logs 
 		case "review":
 			name = fmt.Sprintf("review/%d/review-%s/workflow.log", result.PR, result.revision)
 		}
-		if available[name] {
+		if _, exists := available[name]; exists {
 			result.LogPath = name
+		}
+		log := available[result.LogPath]
+		if result.Timestamp == "" && !log.Modified.IsZero() {
+			result.Timestamp = log.Modified.Format(time.RFC3339Nano)
+		}
+		if log.Bytes == 0 {
+			result.LogPath = ""
 		}
 	}
 }

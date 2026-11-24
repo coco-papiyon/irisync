@@ -29,6 +29,8 @@ if (-not (Test-Path .conductor/poller.local.yaml)) {
 
 ビルドスクリプトは `.conductor/.local/poller.exe` を作成します。再ビルドする場合は、実行中の Poller を `Ctrl+C` で停止してから実行します。
 
+Poller は `.conductor/.local/conductor-runtime/Scripts/conductor.exe` があれば優先し、実装検証でも同じ Conductor を使います。ユーザープロファイルにある Python パッケージの読み取りが Windows サンドボックスで拒否される場合は、リポジトリ内にランタイムを用意します。
+
 ### GitHub 認証を選ぶ
 
 Project は URL の `/projects/` に続く番号を `project_number` に指定します。Irisync Project #4 なら `project_number: 4` です。Project の所有者は既定で `repository` の所有者です。別のユーザーや組織が所有する場合は `project_owner` にそのログイン名を指定します。既存設定で `project_id` を使っている場合は、そのまま使用するか `project_number` に置き換えます。 [Irisync Project #4](https://github.com/users/coco-papiyon/projects/4)
@@ -55,6 +57,8 @@ Project を `gh` で操作するアカウントには `project` スコープと 
 
 設定を確認してから起動します。`-once` を付けると1回だけ確認します。常駐時は `-once` を外し、停止は `Ctrl+C` です。設定を変更したら再起動します。
 
+常駐時は起動直後に Project を確認します。ワークフロー終了後は実行枠を解放してすぐ再確認し、着手できる処理を起動します。承認や CI を待っている間は `poll_interval` に従います。
+
 ```powershell
 .\.conductor\.local\poller.exe -config .conductor/poller.local.yaml -once
 ```
@@ -73,12 +77,15 @@ Project を `gh` で操作するアカウントには `project` スコープと 
 
 Poller を動かしながら画面も開く場合は `poller.local.yaml` に `dashboard_addr: '127.0.0.1:8765'` を追加し、通常どおり起動します。一度に使うビューアーは1つとし、同じポートを使う場合は先に別のビューアーを `Ctrl+C` で停止します。ダッシュボードはループバック IP だけで待ち受けます。
 
-- Issue 一覧にはオープンな Issue の Project ステータスを表示し、番号と件名で検索できます。
+- Issue 一覧は GitHub の Issue 更新日時が新しい順に表示します。Project ステータス、実行中の工程、直近の実行結果を確認でき、実行中の処理列では日時を省略します。番号と件名で検索でき、ログがあるときは一覧から開けます。
 - PR 一覧にはオープンな PR を更新順に最大50件表示します。CI・レビュー状態も確認できます。
 - Issue や PR の件名をクリックすると、GitHub 上のコメント、PR のレビュー、関連する実行結果を表示します。設計書やコメントの原文はリンクから GitHub で開けます。
 - Issue が `Design Review` の場合は **設計を承認** で、表示中の設計版を指定した承認コメントを Issue に投稿します。
 - オープンでレビュー可能な PR の **PR を承認** は、表示中のコミットに GitHub の承認レビューを投稿します。マージは GitHub で行います。
 - 実行結果にはスモークテスト、設計や実装の記録、レビュー結果を表示します。ログがある行の **開く** から、ログの末尾を最大128 KiB 読み取れます。
+- **AI レビュー結果** を押すと、実装や PR 修正の自己レビュー、および PR の独立レビューの指摘やコメントを読めます。直近の実行結果に本文がある場合は Issue 一覧からも開けます。
+
+各工程の開始と終了は Poller を起動した端末にも出力します。Issue 番号、工程、実行ログの相対パスを記録し、終了時には結果、終了コード、所要時間も表示します。
 
 承認者の数値 ID を `design_approver_ids` に登録します。ダッシュボードは、Poller を起動する Windows ユーザーで保存済みの `gh` 認証を使います。未保存の場合は、承認者のアカウントで `gh auth login --hostname github.com --web` を実行します。承認には、設計承認依頼の投稿者、または PR の作成者とは別の人間のアカウントを使います。
 
@@ -88,6 +95,8 @@ Poller を動かしながら画面も開く場合は `poller.local.yaml` に `da
 ダッシュボード右上の **設定** から、承認者の数値 ID とログイン名、ポーリング間隔、Ready の自動処理、テスト・設計・実装の対象 Issue 番号を変更できます。保存先はダッシュボード起動時に `-config` で指定した YAML ファイルです。承認者の変更はダッシュボードにすぐ反映され、稼働中の Poller の処理には Poller の再起動後に反映されます。
 
 ## 自動で設計・実装する
+
+設計では [設計スキル](skills/irisync-design/SKILL.md) を使い、GitHub Issue の情報を要件 ID に分解して、実装計画と受け入れ基準を対応づけます。実装とレビュー指摘の修正では [実装スキル](skills/irisync-implementation/SKILL.md) を使い、承認済み要件に沿ったコードとテストの差分を作ります。
 
 通常運用では `poller.local.yaml` に次の設定を追加します。これで、Issue ごとに設計・実装の番号を設定する必要がなくなります。
 
@@ -103,6 +112,24 @@ auto_ready: true
 対象は設定したリポジトリと Project の Issue です。設計・実装途中の Issue は Poller がローカル状態に記録したものを引き継ぎます。試運転や設計だけの実行には `auto_ready: false` を使い、`design_issue_numbers` と `implementation_issue_numbers` で対象を個別指定します。設定例では `auto_ready` を無効にしています。
 
 設計承認、修正依頼、実装 PR のマージは、リポジトリ操作用とは別の、`design_approver_ids` に登録した人間のアカウントで行います。App モードでは、Project に使う人間のアカウントを承認者に登録できます。
+
+## 手動で作成した PR を引き継ぐ
+
+1. 同じリポジトリの作業ブランチから `main` 向けの PR を作成し、PR 本文の `Fixes #29` などで対応する Issue に紐づけます。Issue に紐づく対象 PR は1件にします。
+2. Project の Issue を `PR Review` にします。通常は `auto_ready: true` を使います。対象を番号で指定する運用では、Issue を `design_issue_numbers` と `implementation_issue_numbers` に含めます。
+3. Poller は次のポーリングで PR を登録し、Issue の要件と既存の設計書を参照して独立レビューします。レビュー・CI 通過後に `Merge Ready` に進みます。PR 作成者とは別の登録済み人間アカウントでレビュー・マージします。Poller はマージを確認して `Done` に更新します。
+
+手動 PR への修正は作業ブランチで行います。新しいコミットは Poller が再レビューします。新規登録にはオープンな PR が必要です。
+
+独立レビューには、対象コミットの GitHub Actions の結果も渡します。レビューは差分の問題を判定し、CI の合否は Poller が別に確認して `Merge Ready` を判定します。
+
+自己レビューと独立レビューは [Irisync のレビュースキル](skills/irisync-review/SKILL.md) を使います。Issue の受け入れ基準ごとの確認結果と、差分で確認できた修正必須の指摘をまとめて記録します。
+
+## 試行上限に達した実装を再開する
+
+原因を解消した後、通常起動のダッシュボードで対象 Issue の詳細を開き、**実装を再開** を押します。承認済み設計の実装が試行上限に達して `Blocked` になり、PR がまだ作成されていない場合に使えます。
+
+現行設計への承認を確認して `Implementing` に戻し、次のポーリングで処理を続けます。作業ツリーと実行履歴を引き継ぎ、試行枠を追加します。現在のステージ済み変更があれば、再開時はその変更の検証から始めます。
 
 ## `Design Review` から進まないとき
 

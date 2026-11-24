@@ -49,6 +49,9 @@ td:first-child { min-width: 180px; }
 tr:hover td { background: #f8fbff; }
 td a, .log-link, .item-link { color: var(--link); font-weight: 650; text-decoration: underline; text-underline-offset: 3px; }
 .issue-number { margin-inline-end: 8px; color: var(--muted); font-weight: 500; font-variant-numeric: tabular-nums; }
+.issue-result { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; min-width: 155px; }
+.issue-result .result-time { color: var(--muted); font-size: 12px; }
+.result-outcome { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
 .badge { padding: 2px 7px; border-radius: 5px; font-size: 12px; font-weight: 650; background: #edf1f7; color: #40546e; }
 .badge.good { background: #def1e8; color: #185b44; }
 .badge.wait { background: #fff0d1; color: #805100; }
@@ -67,6 +70,8 @@ dialog::backdrop { background: rgb(9 21 43 / 60%); }
 .detail-body { border-top: 1px solid var(--border); padding-bottom: 14px; }
 .detail-body h3 { margin: 0; padding: 14px 17px 9px; font-size: 15px; }
 .detail-body .table-wrap { max-height: 265px; }
+.feedback-context { margin: 0; padding: 0 17px 12px; color: var(--muted); font-size: 13px; }
+.feedback-content { border-top: 1px solid var(--border); padding: 14px 17px; max-height: 60vh; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .settings-dialog { width: min(570px, 94vw); }
 .settings-dialog form { padding: 0 17px 16px; }
 .settings-dialog fieldset { display: grid; gap: 5px; margin: 0 0 12px; padding: 0; border: 0; min-width: 0; }

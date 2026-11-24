@@ -59,7 +59,11 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		if total >= reviewFixLimit(kind) {
 			return p.github.setDesignStatus(ctx, item, "Blocked")
 		}
-		job.Feedback += "\n" + readFeedback(previous, "step-error.txt") + "\n" + readFeedback(previous, "review.json")
+		job.Feedback += "\n" + readFeedback(previous, "step-error.txt") + "\n" + readPreviousReview(previous)
+		job.IssueRequirements, err = p.github.reviewIssueRequirements(ctx, item)
+		if err != nil {
+			return err
+		}
 		dir := filepath.Join(workDir, fmt.Sprintf("attempt-%d", fix.attempts+1))
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			return err
@@ -71,7 +75,8 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		if kind == "conflict" {
 			limit = min(limit, 15*time.Minute)
 		}
-		if err := p.runReviewWorkflow(ctx, "implement.yaml", dir, limit, job); err != nil {
+		activity := workflowActivity{Issue: item.Number, PR: pr.Number, Attempt: fix.attempts + 1, Phase: "pr fix"}
+		if err := p.runReviewWorkflow(ctx, "implement.yaml", dir, limit, job, activity); err != nil {
 			return err
 		}
 		tree, err = os.ReadFile(filepath.Join(dir, "approved-tree"))
@@ -101,7 +106,8 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 
 func (p *poller) prepareFix(ctx context.Context, pr pullDetails, design designRef, fix reviewFix, feedback string) (implementationManifest, string, error) {
 	job := implementationManifest{Base: pr.Head.SHA, Design: design.Markdown,
-		Validator: filepath.Join(p.cfg.WorkDir, ".conductor", "scripts", "validate-implementation.ps1")}
+		ConductorExecutable: p.conductor.executable,
+		Validator:           filepath.Join(p.cfg.WorkDir, ".conductor", "scripts", "validate-implementation.ps1")}
 	for _, sha := range []string{pr.Head.SHA, pr.Base.SHA} {
 		if err := p.fetchReviewCommit(ctx, sha); err != nil {
 			return job, "", err

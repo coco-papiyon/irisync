@@ -28,7 +28,7 @@ type runResult struct {
 }
 
 func newConductor(cfg config) (conductorRunner, error) {
-	executable, err := exec.LookPath("conductor")
+	executable, err := conductorExecutable(cfg.WorkDir)
 	if err != nil {
 		return conductorRunner{}, err
 	}
@@ -44,6 +44,21 @@ func newConductor(cfg config) (conductorRunner, error) {
 		}
 	}
 	return runner, nil
+}
+
+func conductorExecutable(workDir string) (string, error) {
+	local := filepath.Join(workDir, ".conductor", ".local", "conductor-runtime", "Scripts", "conductor.exe")
+	info, err := os.Stat(local)
+	if errors.Is(err, os.ErrNotExist) {
+		return exec.LookPath("conductor")
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("local Conductor executable is not a regular file: %s", local)
+	}
+	return filepath.Abs(local)
 }
 
 func (r conductorRunner) run(ctx context.Context, logPath string) runResult {

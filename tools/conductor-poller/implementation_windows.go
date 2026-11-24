@@ -18,8 +18,8 @@ const implementationAttempts = 4
 var errImplementationAttempts = errors.New("implementation correction limit reached")
 
 type implementationRecord struct {
-	base, commit string
-	attempts, pr int
+	base, commit        string
+	attempts, limit, pr int
 }
 
 func (p *poller) advanceImplementation(ctx context.Context, item projectIssue) error {
@@ -42,8 +42,8 @@ func (p *poller) advanceImplementation(ctx context.Context, item projectIssue) e
 		return err
 	}
 	var record implementationRecord
-	err = p.db.db.QueryRowContext(ctx, `SELECT base_sha, attempts, commit_sha, pr_number FROM implementations
-		WHERE issue_id = ? AND design_sha = ?`, item.ID, ref.Head).Scan(&record.base, &record.attempts, &record.commit, &record.pr)
+	err = p.db.db.QueryRowContext(ctx, `SELECT base_sha, attempts, attempt_limit, commit_sha, pr_number FROM implementations
+		WHERE issue_id = ? AND design_sha = ?`, item.ID, ref.Head).Scan(&record.base, &record.attempts, &record.limit, &record.commit, &record.pr)
 	if err != nil {
 		return err
 	}
@@ -120,7 +120,7 @@ func (p *poller) approvedImplementation(ctx context.Context, item projectIssue) 
 	return ref, nil
 }
 
-func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref designRef, branch string, record implementationRecord) (string, error) {
+func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref designRef, branch string, record implementationRecord) (_ string, runErr error) {
 	ctx, cancel := context.WithTimeout(ctx, p.cfg.ImplementationTimeout)
 	defer cancel()
 	workRoot := filepath.Join(p.cfg.DataDir, "implementation", fmt.Sprintf("%d-%s", item.Number, ref.Head))
@@ -134,16 +134,25 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 	previous := filepath.Join(workRoot, fmt.Sprintf("attempt-%d", record.attempts))
 	job := implementationManifest{
 		Worktree: worktree, Branch: branch, Base: record.base, Design: ref.Markdown,
-		Validator: filepath.Join(p.cfg.WorkDir, ".conductor", "scripts", "validate-implementation.ps1"),
-		Feedback:  strings.TrimSpace(readFeedback(previous, "step-error.txt") + "\n" + readFeedback(previous, "review.json")),
+		ConductorExecutable: p.conductor.executable,
+		Validator:           filepath.Join(p.cfg.WorkDir, ".conductor", "scripts", "validate-implementation.ps1"),
+		Feedback:            strings.TrimSpace(readFeedback(previous, "step-error.txt") + "\n" + readPreviousReview(previous)),
 	}
 	if tree, err := os.ReadFile(filepath.Join(previous, "approved-tree")); err == nil && job.checkTree(string(tree)) == nil {
 		return p.commitImplementation(ctx, item, ref.Head, record.base, string(tree))
 	}
-	if record.attempts >= implementationAttempts {
+	if record.attempts >= record.limit {
 		return "", errImplementationAttempts
 	}
+	requirements, err := p.github.reviewIssueRequirements(ctx, item)
+	if err != nil {
+		return "", err
+	}
+	job.IssueRequirements = requirements
 	attempt := record.attempts + 1
+	if record.attempts >= implementationAttempts && record.limit-record.attempts == implementationAttempts {
+		job.reuseStagedImplementation(ctx)
+	}
 	dir := filepath.Join(workRoot, fmt.Sprintf("attempt-%d", attempt))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
@@ -169,17 +178,19 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 		return "", err
 	}
 	workflow := filepath.Join(p.cfg.WorkDir, ".conductor", "workflows", "implement.yaml")
+	finishActivity := p.trackWorkflow(ctx, workflowActivity{Issue: item.Number, Attempt: attempt, Phase: "implementation attempt"}, log.Name())
+	defer func() { finishActivity(classifyRun(ctx, runErr)) }()
 	err = runInJob(ctx, p.cfg.WorkDir, log, p.conductor.executable, "--silent", "run", workflow, "--no-interactive",
 		"--input", "adapter="+self, "--input", "manifest="+manifestPath)
 	if err != nil {
-		if ctx.Err() == nil && attempt == implementationAttempts {
+		if ctx.Err() == nil && attempt == record.limit {
 			return "", errImplementationAttempts
 		}
 		return "", err
 	}
 	tree, err := os.ReadFile(filepath.Join(dir, "approved-tree"))
 	if err != nil {
-		if ctx.Err() == nil && attempt == implementationAttempts {
+		if ctx.Err() == nil && attempt == record.limit {
 			return "", errImplementationAttempts
 		}
 		return "", fmt.Errorf("implementation attempt %d did not pass all checks; see %s", attempt, log.Name())

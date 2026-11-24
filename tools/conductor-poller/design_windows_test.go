@@ -2,10 +2,38 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDesignSkillReceivesIssueAndReferenceDocuments(t *testing.T) {
+	secret := "ghs_" + strings.Repeat("x", 24)
+	item := projectIssue{Number: 30, Repository: "irisync/repo"}
+	issue := designIssue{Title: "設定を検証する", Body: "受け入れ基準: 空のペア ID を拒否する。 " + secret}
+	data, err := designSkillInput(item, issue, map[string]string{"docs/design/basic-design.md": "重複を拒否する"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, input, ok := strings.Cut(string(data), "\n\n入力データ（JSON）\n")
+	if !ok || !strings.HasPrefix(prompt, irisyncDesignSkill) {
+		t.Fatal("design skill was not supplied to the adapter")
+	}
+	var payload struct {
+		Issue struct {
+			Number           int
+			URL, Title, Body string
+		}
+		Documents map[string]string `json:"repository_documents"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil || payload.Issue.Number != 30 ||
+		payload.Issue.URL != "https://github.com/irisync/repo/issues/30" || payload.Issue.Title != issue.Title ||
+		!strings.Contains(payload.Issue.Body, "空のペア ID") || strings.Contains(payload.Issue.Body, secret) ||
+		payload.Documents["docs/design/basic-design.md"] != "重複を拒否する" {
+		t.Fatalf("unexpected design input: %+v (%v)", payload, err)
+	}
+}
 
 func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 	now := time.Now().UTC()
