@@ -38,6 +38,15 @@ type dependencyPage struct {
 
 func (g githubProject) promotePending(ctx context.Context, issues []projectIssue) (int, error) {
 	pending, statuses := pendingAndStatuses(issues, g.cfg.Repository)
+	if len(pending) == 0 {
+		return 0, nil
+	}
+	itemIndex := make(map[string]int, len(pending))
+	for i, item := range issues {
+		if item.Status == "Pending" {
+			itemIndex[item.ItemID] = i
+		}
+	}
 	promoted := 0
 	var promotionErr error
 	const batchSize = 25
@@ -68,6 +77,7 @@ func (g githubProject) promotePending(ctx context.Context, issues []projectIssue
 				promotionErr = errors.Join(promotionErr, fmt.Errorf("promote issue #%d: %w", issue.Number, err))
 				continue
 			}
+			issues[itemIndex[issue.ItemID]].Status = "Ready"
 			promoted++
 			slog.Info("issue prerequisites are Done", "issue", issue.Number)
 		}

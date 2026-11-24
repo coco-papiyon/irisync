@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type pullDetails struct {
@@ -12,6 +13,7 @@ type pullDetails struct {
 	Merged    bool
 	Mergeable *bool
 	Draft     bool
+	User      githubIdentity
 	MergedBy  struct {
 		ID          int64
 		Login, Type string
@@ -19,14 +21,13 @@ type pullDetails struct {
 }
 
 type humanReview struct {
-	ID       int64
-	State    string
-	Body     string
-	CommitID string `json:"commit_id"`
-	User     struct {
-		ID          int64
-		Login, Type string
-	}
+	ID          int64
+	State       string
+	Body        string
+	CommitID    string    `json:"commit_id"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	URL         string    `json:"html_url"`
+	User        githubIdentity
 }
 
 func (g githubProject) pullDetails(ctx context.Context, number int, branch string) (pullDetails, error) {
@@ -44,13 +45,18 @@ func (g githubProject) pullDetails(ctx context.Context, number int, branch strin
 }
 
 func authorizedHuman(cfg config, id int64, login, userType string) bool {
-	return userType == "User" && login != "" && !strings.EqualFold(login, cfg.GitHubLogin) && slices.Contains(cfg.DesignApproverIDs, id)
+	actor := githubIdentity{ID: id, Login: login, Type: userType}
+	return registeredApprover(cfg, actor) && !actor.sameAccount(githubIdentity{Login: cfg.GitHubLogin})
 }
 
-func requestedHumanReview(reviews []humanReview, cfg config, head string) humanReview {
+func registeredApprover(cfg config, actor githubIdentity) bool {
+	return actor.Type == "User" && actor.ID > 0 && actor.Login != "" && slices.Contains(cfg.DesignApproverIDs, actor.ID)
+}
+
+func requestedHumanReview(reviews []humanReview, cfg config, pr pullDetails) humanReview {
 	latest := make(map[int64]humanReview)
 	for _, review := range reviews {
-		if review.CommitID != head || !authorizedHuman(cfg, review.User.ID, review.User.Login, review.User.Type) {
+		if review.CommitID != pr.Head.SHA || !registeredApprover(cfg, review.User) || review.User.sameAccount(pr.User) {
 			continue
 		}
 		switch review.State {
@@ -70,12 +76,12 @@ func requestedHumanReview(reviews []humanReview, cfg config, head string) humanR
 }
 
 func (g githubProject) humanRequest(ctx context.Context, pr pullDetails) (humanReview, error) {
-	var pages [][]humanReview
 	pull := fmt.Sprintf("repos/%s/pulls/%d", g.cfg.Repository, pr.Number)
-	if err := g.getJSON(ctx, &pages, pull+"/reviews?per_page=100", "--paginate", "--slurp"); err != nil {
+	reviews, err := g.pullReviews(ctx, pull)
+	if err != nil {
 		return humanReview{}, err
 	}
-	request := requestedHumanReview(slices.Concat(pages...), g.cfg, pr.Head.SHA)
+	request := requestedHumanReview(reviews, g.cfg, pr)
 	if request.ID == 0 {
 		return request, nil
 	}
@@ -97,12 +103,45 @@ func (g githubProject) humanRequest(ctx context.Context, pr pullDetails) (humanR
 	return request, nil
 }
 
+func (g githubProject) hasChangeRequest(ctx context.Context, pr pullDetails) (bool, error) {
+	reviews, err := g.pullReviews(ctx, fmt.Sprintf("repos/%s/pulls/%d", g.cfg.Repository, pr.Number))
+	return requestedHumanReview(reviews, g.cfg, pr).ID != 0, err
+}
+
+func (g githubProject) pullReviews(ctx context.Context, pull string) ([]humanReview, error) {
+	var pages [][]humanReview
+	if err := g.getJSON(ctx, &pages, pull+"/reviews?per_page=100", "--paginate", "--slurp"); err != nil {
+		return nil, err
+	}
+	return slices.Concat(pages...), nil
+}
+
 type prCheck struct {
 	Name, Status, Conclusion string
 	App                      struct {
 		ID   int64
 		Slug string
 	}
+}
+
+type reviewCICheck struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+}
+
+func reviewCIEvidence(checks []prCheck) []reviewCICheck {
+	evidence := make([]reviewCICheck, 0, 3)
+	for _, check := range checks {
+		if check.App.ID != 15368 || check.App.Slug != "github-actions" {
+			continue
+		}
+		switch check.Name {
+		case "Conductor smoke (Windows)", "Irisync Go (windows-2025)", "Irisync Go (ubuntu-latest)":
+			evidence = append(evidence, reviewCICheck{Name: check.Name, Status: check.Status, Conclusion: check.Conclusion})
+		}
+	}
+	return evidence
 }
 
 func successfulWindowsCheck(checks []prCheck) bool {
@@ -115,39 +154,48 @@ func successfulWindowsCheck(checks []prCheck) bool {
 }
 
 func (g githubProject) windowsCheck(ctx context.Context, head string) (bool, error) {
+	checks, err := g.reviewChecks(ctx, head, "&check_name=Conductor+smoke+%28Windows%29")
+	return successfulWindowsCheck(checks), err
+}
+
+func (g githubProject) reviewChecks(ctx context.Context, head, filter string) ([]prCheck, error) {
 	var pages []struct {
 		CheckRuns []prCheck `json:"check_runs"`
 	}
-	path := fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&check_name=Conductor+smoke+%%28Windows%%29&per_page=100", g.cfg.Repository, head)
+	path := fmt.Sprintf("repos/%s/commits/%s/check-runs?filter=latest&per_page=100%s", g.cfg.Repository, head, filter)
 	if err := g.getJSON(ctx, &pages, path, "--paginate", "--slurp"); err != nil {
-		return false, err
+		return nil, err
 	}
 	var checks []prCheck
 	for _, page := range pages {
 		checks = append(checks, page.CheckRuns...)
 	}
-	return successfulWindowsCheck(checks), nil
+	return checks, nil
 }
 
 func (g githubProject) publishReview(ctx context.Context, pr pullDetails, verdict reviewVerdict) error {
 	marker := "<!-- irisync-review:" + pr.Head.SHA + ":" + pr.Base.SHA + " -->"
+	body := "独立したCodexレビューで修正が必要な指摘はありませんでした。"
+	if !verdict.Approved {
+		text := strings.ReplaceAll(strings.TrimSpace(boundedReviewText(verdict.Feedback)), "@", "＠")
+		body = "独立したCodexレビューで修正が必要な指摘がありました。\n\n    " + strings.ReplaceAll(text, "\n", "\n    ")
+	}
+	payload := map[string]string{
+		"body": marker + "\n" + body + "\n\n対象コミット " + pr.Head.SHA,
+	}
 	comments, err := g.comments(ctx, pr.Number)
 	if err != nil {
 		return err
 	}
 	for _, comment := range comments {
 		if strings.EqualFold(comment.User.Login, g.cfg.GitHubLogin) && strings.HasPrefix(comment.Body, marker+"\n") {
-			return nil
+			if comment.Body == payload["body"] {
+				return nil
+			}
+			return g.mutate(ctx, "PATCH", fmt.Sprintf("repos/%s/issues/comments/%d", g.cfg.Repository, comment.ID), payload)
 		}
 	}
-	body := "独立したCodexレビューで修正が必要な指摘はありませんでした。"
-	if !verdict.Approved {
-		text := strings.ReplaceAll(strings.TrimSpace(boundedReviewText(verdict.Feedback)), "@", "＠")
-		body = "独立したCodexレビューで修正が必要な指摘がありました。\n\n    " + strings.ReplaceAll(text, "\n", "\n    ")
-	}
-	return g.mutate(ctx, "POST", fmt.Sprintf("repos/%s/issues/%d/comments", g.cfg.Repository, pr.Number), map[string]string{
-		"body": marker + "\n" + body + "\n\n対象コミット " + pr.Head.SHA,
-	})
+	return g.mutate(ctx, "POST", fmt.Sprintf("repos/%s/issues/%d/comments", g.cfg.Repository, pr.Number), payload)
 }
 
 func boundedReviewText(input string) string {

@@ -2,10 +2,38 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDesignSkillReceivesIssueAndReferenceDocuments(t *testing.T) {
+	secret := "ghs_" + strings.Repeat("x", 24)
+	item := projectIssue{Number: 30, Repository: "irisync/repo"}
+	issue := designIssue{Title: "設定を検証する", Body: "受け入れ基準: 空のペア ID を拒否する。 " + secret}
+	data, err := designSkillInput(item, issue, map[string]string{"docs/design/basic-design.md": "重複を拒否する"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt, input, ok := strings.Cut(string(data), "\n\n入力データ（JSON）\n")
+	if !ok || !strings.HasPrefix(prompt, irisyncDesignSkill) {
+		t.Fatal("design skill was not supplied to the adapter")
+	}
+	var payload struct {
+		Issue struct {
+			Number           int
+			URL, Title, Body string
+		}
+		Documents map[string]string `json:"repository_documents"`
+	}
+	if err := json.Unmarshal([]byte(input), &payload); err != nil || payload.Issue.Number != 30 ||
+		payload.Issue.URL != "https://github.com/irisync/repo/issues/30" || payload.Issue.Title != issue.Title ||
+		!strings.Contains(payload.Issue.Body, "空のペア ID") || strings.Contains(payload.Issue.Body, secret) ||
+		payload.Documents["docs/design/basic-design.md"] != "重複を拒否する" {
+		t.Fatalf("unexpected design input: %+v (%v)", payload, err)
+	}
+}
 
 func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 	now := time.Now().UTC()
@@ -27,14 +55,15 @@ func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 	edited.UpdatedAt = now.Add(time.Second)
 	selfApproval := comment(14, 2, "automation", "/approve-design")
 	shortSHA := comment(15, 1, "owner", "/approve-design "+sha[:7])
-	if result := findApproval([]designComment{request, earlier, wrongUser, oldRevision, edited, selfApproval, shortSHA}, cfg, request.Body, sha); result.ID != 0 {
+	renamedAuthor := comment(16, 2, "renamed-automation", "/approve-design")
+	if result := findApproval([]designComment{request, earlier, wrongUser, oldRevision, edited, selfApproval, shortSHA, renamedAuthor}, cfg, request.Body, sha); result.ID != 0 {
 		t.Fatalf("accepted invalid approval: %d", result.ID)
 	}
-	valid := comment(16, 1, "owner", "/approve-design")
+	valid := comment(17, 1, "owner", "/approve-design")
 	if result := findApproval([]designComment{valid, request}, cfg, request.Body, sha); result.ID != valid.ID {
 		t.Fatalf("did not accept valid approval: %d", result.ID)
 	}
-	newRequest := comment(17, 2, "automation", p.requestBody(path, sha, 2))
+	newRequest := comment(18, 2, "automation", p.requestBody(path, sha, 2))
 	if result := findApproval([]designComment{request, valid, newRequest}, cfg, newRequest.Body, sha); result.ID != 0 {
 		t.Fatalf("reused approval from prior review: %d", result.ID)
 	}
@@ -45,7 +74,7 @@ func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 
 	legacyRequest := request
 	legacyRequest.Body += " " + sha
-	legacyApproval := comment(18, 1, "owner", "/approve-design "+sha)
+	legacyApproval := comment(19, 1, "owner", "/approve-design "+sha)
 	for _, approval := range []designComment{valid, legacyApproval} {
 		if result := findApproval([]designComment{legacyRequest, approval}, cfg, request.Body, sha); result.ID != approval.ID {
 			t.Fatalf("did not accept approval %d for existing request: got %d", approval.ID, result.ID)

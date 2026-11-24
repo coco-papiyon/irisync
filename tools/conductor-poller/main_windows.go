@@ -42,17 +42,21 @@ func main() {
 	}
 	configPath := flag.String("config", ".conductor/poller.example.yaml", "YAML configuration file")
 	once := flag.Bool("once", false, "poll once and wait for eligible runs")
+	dashboardOnly := flag.Bool("dashboard-only", false, "serve the dashboard without running issue workflows")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, *configPath, *once); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, *configPath, *once, *dashboardOnly); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("poller stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, configPath string, once bool) error {
+func run(ctx context.Context, configPath string, once, dashboardOnly bool) error {
+	if once && dashboardOnly {
+		return fmt.Errorf("-once and -dashboard-only cannot be used together")
+	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -65,6 +69,9 @@ func run(ctx context.Context, configPath string, once bool) error {
 		return err
 	}
 	cfg = gh.cfg
+	if dashboardOnly {
+		return runDashboardOnly(ctx, cfg, gh, configPath)
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return err
 	}
@@ -73,6 +80,13 @@ func run(ctx context.Context, configPath string, once bool) error {
 		return err
 	}
 	defer closeState()
+	if cfg.DashboardAddr != "" {
+		stop, err := startDashboard(ctx, cfg.DashboardAddr, gh, db.db, false, configPath)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	conductor, err := newConductor(cfg)
 	if err != nil {
 		return err
@@ -87,25 +101,42 @@ type poller struct {
 	db            *state
 	workers       sync.WaitGroup
 	slots         chan struct{}
+	workflowDone  chan struct{}
 	designMu      sync.Mutex
 	activeDesigns map[string]bool
+	retryAfter    map[string]time.Time
 	nextItem      int
 }
 
 func (p *poller) loop(ctx context.Context, once bool) error {
 	p.slots = make(chan struct{}, p.cfg.ParallelRuns)
+	p.workflowDone = make(chan struct{}, 1)
 	p.activeDesigns = make(map[string]bool)
+	p.retryAfter = make(map[string]time.Time)
 	defer p.workers.Wait()
+	return runPollingLoop(ctx, once, p.cfg.PollInterval, p.workflowDone, p.poll)
+}
 
-	delay := p.cfg.PollInterval
+func runPollingLoop(ctx context.Context, once bool, interval time.Duration, workflowDone <-chan struct{}, poll func(context.Context) error) error {
+	delay := interval
 	for {
-		err := p.poll(ctx)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		// This poll also covers any work that finished before it began.
+		select {
+		case <-workflowDone:
+		default:
+		}
+		err := poll(ctx)
 		if once || ctx.Err() != nil {
 			return err
 		}
+		wake := workflowDone
 		if err == nil {
-			delay = p.cfg.PollInterval
+			delay = interval
 		} else {
+			wake = nil
 			slog.Warn("poll failed; retrying", "error", err, "delay", delay)
 		}
 		timer := time.NewTimer(delay)
@@ -114,10 +145,19 @@ func (p *poller) loop(ctx context.Context, once bool) error {
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
+		case <-wake:
+			timer.Stop()
 		}
 		if err != nil {
-			delay = min(delay*2, p.cfg.PollInterval*4)
+			delay = min(delay*2, interval*4)
 		}
+	}
+}
+
+func (p *poller) requestPoll() {
+	select {
+	case p.workflowDone <- struct{}{}:
+	default:
 	}
 }
 
@@ -138,7 +178,7 @@ func (p *poller) poll(ctx context.Context) error {
 		if !p.github.runnable(item) {
 			continue
 		}
-		if p.cfg.AutoReady && item.Status != "Ready" {
+		if p.cfg.AutoReady && item.Status != "Ready" && !(item.Status == "PR Review" && !item.Closed) {
 			tracked, err := p.db.tracksIssue(ctx, item)
 			if err != nil {
 				return err
@@ -184,9 +224,7 @@ func (p *poller) poll(ctx context.Context) error {
 		started++
 		// Rotate the starting point so a review that needs repeated polling
 		// cannot take the only worker slot every cycle.
-		if p.cfg.AutoReady {
-			p.nextItem = (index + 1) % len(items)
-		}
+		p.nextItem = (index + 1) % len(items)
 	}
 	slog.Info("project polled", "ready", eligible, "started", started, "promoted", promoted)
 	return promotionErr
@@ -194,15 +232,19 @@ func (p *poller) poll(ctx context.Context) error {
 
 func (p *poller) execute(ctx context.Context, item projectIssue, runID int64) {
 	defer p.workers.Done()
-	defer func() { <-p.slots }()
+	defer func() {
+		<-p.slots
+		p.requestPoll()
+	}()
 	logPath := filepath.Join(p.cfg.DataDir, fmt.Sprintf("run-%d.log", runID))
 	runCtx, cancel := context.WithTimeout(ctx, p.cfg.WorkflowTimeout)
 	defer cancel()
+	finishActivity := p.trackWorkflow(runCtx, workflowActivity{Issue: item.Number, RunID: runID, Phase: "smoke"}, logPath)
 	result := p.conductor.run(runCtx, logPath)
+	defer finishActivity(result)
 	saveCtx, stopSave := context.WithTimeout(context.Background(), 5*time.Second)
 	defer stopSave()
 	if err := p.db.finish(saveCtx, runID, logPath, result); err != nil {
 		slog.Error("could not save run result", "run", runID, "error", err)
 	}
-	slog.Info("workflow finished", "issue", item.Number, "run", runID, "outcome", result.outcome, "exit_code", result.exitCode)
 }

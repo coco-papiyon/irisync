@@ -14,6 +14,13 @@ Windowsで動作を確認した構成は、Conductor `0.1.47`、Python `3.12.13`
 
 GitHub Actionsの `Conductor smoke (Windows)` も同じスクリプトを実行する。GitHubのトークン権限は `contents: read` で、チェックアウト後のGit操作に認証情報を残さない。
 
+Windows サンドボックスがユーザープロファイルにある Conductor の依存パッケージを読み取れない場合は、リポジトリのルートで固定バージョンをローカルの仮想環境にインストールする。Poller はこの場所を優先し、実装と PR 修正の検証にも同じ Conductor を使う。
+
+```powershell
+py -3.12 -m venv .conductor/.local/conductor-runtime
+.\.conductor\.local\conductor-runtime\Scripts\python.exe -m pip install 'conductor-cli @ git+https://github.com/microsoft/conductor.git@ac6b1f4abe8023a51045f946f67199b0f9fc47c8'
+```
+
 ## Projectと認証
 
 Irisyncは `coco-papiyon` が所有する非公開の [Project #4](https://github.com/users/coco-papiyon/projects/4) を使う。設定にはURLに表示される番号を `project_number: 4` として記載する。`Status` の定義、権限を確認するコマンド、検証用Issueの更新方法は[Conductor検討書](design/conductor-feasibility-study.md#45-github-cliの認証と起動前確認)を参照する。
@@ -61,7 +68,7 @@ Conductorを実行するWindowsユーザーで `codex login status` を確認す
 
 Polling Controllerは、Issue情報とローカルの設計文書をCodex CLIに渡してMarkdownを生成する。実行時はレビュー済みブランチのチェックアウトを使い、Issue本文には設計に必要な公開情報だけを記載する。設計書は `conductor/design/issue-N` ブランチの `docs/design/issues/issue-N.md` に保存され、Issueにコミット固定リンクと承認コマンドが表示される。
 
-承認者は最新の依頼から設計書を確認し、`/approve-design` だけを1行でIssueに新規コメントとして投稿する。リポジトリ操作用とは別の人間のアカウントを承認者とし、その数値IDを `design_approver_ids` に登録する。設計が更新されたら最新の承認依頼に対して投稿し直す。Polling Controllerは承認者・コメントID・依頼の設計コミットSHAをSQLiteに記録する。
+承認者は最新の依頼から設計書を確認し、`/approve-design` だけを1行でIssueに新規コメントとして投稿する。承認依頼の投稿者とは別の人間のアカウントを承認者とし、その数値IDを `design_approver_ids` に登録する。設計が更新されたら最新の承認依頼に対して投稿し直す。Polling Controllerは承認者・コメントID・依頼の設計コミットSHAをSQLiteに記録する。
 
 ## 承認済み設計の実装とPR作成
 

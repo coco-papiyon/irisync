@@ -81,7 +81,7 @@ func storedGitHubToken(ctx context.Context, login string) (string, error) {
 	})
 	output, err := cmd.Output()
 	if err != nil || strings.TrimSpace(string(output)) == "" {
-		return "", fmt.Errorf("no stored gh authentication for github_project_login %q", login)
+		return "", fmt.Errorf("no stored gh authentication for %q", login)
 	}
 	return strings.TrimSpace(string(output)), nil
 }

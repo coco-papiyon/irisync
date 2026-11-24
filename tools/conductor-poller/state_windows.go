@@ -30,6 +30,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS one_live_or_successful_smoke_run
 	ON smoke_runs (issue_id)
 	WHERE outcome IN ('running', 'succeeded');
 CREATE INDEX IF NOT EXISTS smoke_run_history ON smoke_runs (issue_id);
+CREATE TABLE IF NOT EXISTS active_workflows (
+	issue_number INTEGER PRIMARY KEY,
+	pr_number INTEGER NOT NULL,
+	phase TEXT NOT NULL,
+	attempt INTEGER NOT NULL,
+	log_path TEXT NOT NULL,
+	started_at TEXT NOT NULL,
+	process_id INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS designs (
     issue_id TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL DEFAULT 0,
@@ -46,6 +55,7 @@ CREATE TABLE IF NOT EXISTS implementations (
     design_sha TEXT NOT NULL,
     base_sha TEXT NOT NULL,
     attempts INTEGER NOT NULL DEFAULT 0,
+    attempt_limit INTEGER NOT NULL DEFAULT 4,
     commit_sha TEXT NOT NULL DEFAULT '',
     pr_number INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (issue_id, design_sha)
@@ -56,7 +66,13 @@ CREATE TABLE IF NOT EXISTS pr_reviews (
 	base_sha TEXT NOT NULL,
 	approved INTEGER NOT NULL,
 	feedback TEXT NOT NULL,
+	policy_version INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY (pr_number, head_sha, base_sha)
+);
+CREATE TABLE IF NOT EXISTS manual_prs (
+	issue_id TEXT PRIMARY KEY,
+	pr_number INTEGER NOT NULL UNIQUE,
+	head_branch TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS pr_fixes (
 	id INTEGER PRIMARY KEY,
@@ -100,6 +116,18 @@ func openState(ctx context.Context, dir string) (*state, func(), error) {
 		closeState()
 		return nil, nil, err
 	}
+	if err := ensureReviewPolicyVersion(ctx, db); err != nil {
+		closeState()
+		return nil, nil, err
+	}
+	if err := ensureImplementationAttemptLimit(ctx, db); err != nil {
+		closeState()
+		return nil, nil, err
+	}
+	if _, err := db.ExecContext(ctx, "DELETE FROM active_workflows"); err != nil {
+		closeState()
+		return nil, nil, err
+	}
 	// The previous instance no longer holds the lock. Only a fresh poll of
 	// GitHub can make an interrupted smoke run eligible again.
 	if _, err := db.ExecContext(ctx, `
@@ -112,10 +140,32 @@ func openState(ctx context.Context, dir string) (*state, func(), error) {
 	return &state{db}, closeState, nil
 }
 
+func ensureImplementationAttemptLimit(ctx context.Context, db *sql.DB) error {
+	var exists bool
+	err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pragma_table_info('implementations') WHERE name = 'attempt_limit')").Scan(&exists)
+	if err != nil || exists {
+		return err
+	}
+	_, err = db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE implementations ADD COLUMN attempt_limit INTEGER NOT NULL DEFAULT %d", implementationAttempts))
+	return err
+}
+
+func ensureReviewPolicyVersion(ctx context.Context, db *sql.DB) error {
+	var exists bool
+	err := db.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pragma_table_info('pr_reviews') WHERE name = 'policy_version')").Scan(&exists)
+	if err != nil || exists {
+		return err
+	}
+	_, err = db.ExecContext(ctx, "ALTER TABLE pr_reviews ADD COLUMN policy_version INTEGER NOT NULL DEFAULT 0")
+	return err
+}
+
 func (s *state) tracksIssue(ctx context.Context, item projectIssue) (bool, error) {
 	query := "SELECT EXISTS (SELECT 1 FROM designs WHERE issue_id = ?)"
 	if isReviewStatus(item.Status) {
-		query = "SELECT EXISTS (SELECT 1 FROM implementations WHERE issue_id = ? AND pr_number != 0)"
+		query = `SELECT EXISTS (
+			SELECT 1 FROM implementations WHERE issue_id = ?1 AND pr_number != 0
+			UNION ALL SELECT 1 FROM manual_prs WHERE issue_id = ?1)`
 	}
 	var tracked bool
 	err := s.db.QueryRowContext(ctx, query, item.ID).Scan(&tracked)

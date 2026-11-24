@@ -16,6 +16,72 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestConductorPrefersRepositoryRuntime(t *testing.T) {
+	root := t.TempDir()
+	local := filepath.Join(root, ".conductor", ".local", "conductor-runtime", "Scripts", "conductor.exe")
+	if err := os.MkdirAll(filepath.Dir(local), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(local, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	path, err := conductorExecutable(root)
+	if err != nil || path != local {
+		t.Fatalf("Conductor path = %q, want %q (%v)", path, local, err)
+	}
+}
+
+func TestPollingStartsImmediatelyAndWakesOnCompletion(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := poller{workflowDone: make(chan struct{}, 1)}
+	polled := make(chan struct{}, 2)
+	done := make(chan error, 1)
+	go func() {
+		done <- runPollingLoop(ctx, false, time.Hour, p.workflowDone, func(context.Context) error {
+			polled <- struct{}{}
+			return nil
+		})
+	}()
+
+	expectPoll := func() {
+		t.Helper()
+		select {
+		case <-polled:
+		case <-time.After(2 * time.Second):
+			t.Fatal("poll did not run immediately")
+		}
+	}
+	expectPoll()
+	p.requestPoll()
+	expectPoll()
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("poll loop did not stop: %v", err)
+	}
+}
+
+func TestPollingOnceDoesNotDrainCompletions(t *testing.T) {
+	p := poller{workflowDone: make(chan struct{}, 1)}
+	count := 0
+	err := runPollingLoop(context.Background(), true, time.Hour, p.workflowDone, func(context.Context) error {
+		count++
+		p.requestPoll()
+		p.requestPoll()
+		return nil
+	})
+	if err != nil || count != 1 || len(p.workflowDone) != 1 {
+		t.Fatalf("once polled %d times with %d notifications (%v)", count, len(p.workflowDone), err)
+	}
+}
+
+func TestFailedWorkflowWaitsBeforeRetryingTheSameIssue(t *testing.T) {
+	p := poller{retryAfter: map[string]time.Time{"failed": time.Now().Add(time.Hour)}}
+	if p.launchDesign(context.Background(), projectIssue{ID: "failed"}) {
+		t.Fatal("a failed workflow was immediately restarted")
+	}
+}
+
 func TestStateRecoversAnInterruptedRunWithoutRerunningSuccess(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
