@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"slices"
 
 	"gopkg.in/yaml.v3"
 )
@@ -89,7 +90,8 @@ func checkMappingKeys(mapping *yaml.Node, fingerprints map[*yaml.Node]*keyFinger
 			continue
 		}
 		for _, previous := range keys[*fingerprint] {
-			if sameKey(key, previous, make(map[keyComparison]bool), make(map[keyComparison]bool)) {
+			comparison := keyComparator{fingerprints: fingerprints, results: make(map[keyComparison]bool)}
+			if comparison.same(key, previous) {
 				return duplicateKey(key)
 			}
 		}
@@ -104,6 +106,21 @@ func duplicateKey(node *yaml.Node) error {
 
 type keyFingerprint [sha256.Size]byte
 
+// A fixed-width pair keeps each mapping key bound to its value when sorted.
+type entryFingerprint [2 * sha256.Size]byte
+
+func fingerprintEntry(key, value *yaml.Node, fingerprints map[*yaml.Node]*keyFingerprint) (entryFingerprint, bool) {
+	var entry entryFingerprint
+	keyHash := fingerprintKey(key, fingerprints)
+	valueHash := fingerprintKey(value, fingerprints)
+	if keyHash == nil || valueHash == nil {
+		return entry, false
+	}
+	copy(entry[:sha256.Size], keyHash[:])
+	copy(entry[sha256.Size:], valueHash[:])
+	return entry, true
+}
+
 func fingerprintKey(node *yaml.Node, fingerprints map[*yaml.Node]*keyFingerprint) *keyFingerprint {
 	if node == nil {
 		return nil
@@ -111,9 +128,8 @@ func fingerprintKey(node *yaml.Node, fingerprints map[*yaml.Node]*keyFingerprint
 	if fingerprint, found := fingerprints[node]; found {
 		return fingerprint
 	}
-	// Mark the node active before following edges. A revisit returns nil because
-	// recursive aliases cannot establish a finite match in sameKey. Leave nil
-	// cached for any node that reaches a cycle.
+	// A revisit while the node is active returns nil. Keep nil cached for
+	// any node that reaches a cycle.
 	fingerprints[node] = nil
 	if node.Kind == yaml.AliasNode {
 		fingerprint := fingerprintKey(node.Alias, fingerprints)
@@ -133,12 +149,27 @@ func fingerprintKey(node *yaml.Node, fingerprints map[*yaml.Node]*keyFingerprint
 	writeUint(uint64(len(node.Value)))
 	io.WriteString(digest, node.Value)
 	writeUint(uint64(len(node.Content)))
-	for _, child := range node.Content {
-		fingerprint := fingerprintKey(child, fingerprints)
-		if fingerprint == nil {
-			return nil
+	if node.Kind == yaml.MappingNode {
+		entries := make([]entryFingerprint, 0, len(node.Content)/2)
+		for i := 0; i < len(node.Content); i += 2 {
+			entry, ok := fingerprintEntry(node.Content[i], node.Content[i+1], fingerprints)
+			if !ok {
+				return nil
+			}
+			entries = append(entries, entry)
 		}
-		digest.Write(fingerprint[:])
+		slices.SortFunc(entries, func(a, b entryFingerprint) int { return bytes.Compare(a[:], b[:]) })
+		for _, entry := range entries {
+			digest.Write(entry[:])
+		}
+	} else {
+		for _, child := range node.Content {
+			fingerprint := fingerprintKey(child, fingerprints)
+			if fingerprint == nil {
+				return nil
+			}
+			digest.Write(fingerprint[:])
+		}
 	}
 	fingerprint := new(keyFingerprint)
 	digest.Sum(fingerprint[:0])
@@ -150,38 +181,68 @@ type keyComparison struct {
 	left, right *yaml.Node
 }
 
-func sameKey(left, right *yaml.Node, active, completed map[keyComparison]bool) (equal bool) {
+type keyComparator struct {
+	fingerprints map[*yaml.Node]*keyFingerprint
+	results      map[keyComparison]bool
+}
+
+func (c keyComparator) same(left, right *yaml.Node) (equal bool) {
 	comparison := keyComparison{left, right}
-	if equal, found := completed[comparison]; found {
+	if equal, found := c.results[comparison]; found {
 		return equal
 	}
-	if active[comparison] {
-		// A recursive alias cannot establish a finite structural match.
-		return false
-	}
-	active[comparison] = true
-	defer func() {
-		delete(active, comparison)
-		completed[comparison] = equal
-	}()
+	c.results[comparison] = false
+	defer func() { c.results[comparison] = equal }()
 
 	if left == nil || right == nil {
 		return false
 	}
 	if left.Kind == yaml.AliasNode {
-		return sameKey(left.Alias, right, active, completed)
+		return c.same(left.Alias, right)
 	}
 	if right.Kind == yaml.AliasNode {
-		return sameKey(left, right.Alias, active, completed)
+		return c.same(left, right.Alias)
 	}
 	if left.Kind != right.Kind || left.Tag != right.Tag || left.Value != right.Value ||
 		len(left.Content) != len(right.Content) {
 		return false
 	}
+	if left.Kind == yaml.MappingNode {
+		return c.sameMapping(left.Content, right.Content)
+	}
 	for index, child := range left.Content {
-		if !sameKey(child, right.Content[index], active, completed) {
+		if !c.same(child, right.Content[index]) {
 			return false
 		}
+	}
+	return true
+}
+
+func (c keyComparator) sameMapping(left, right []*yaml.Node) bool {
+	candidates := make(map[entryFingerprint][]int, len(right)/2)
+	for i := 0; i < len(right); i += 2 {
+		entry, ok := fingerprintEntry(right[i], right[i+1], c.fingerprints)
+		if !ok {
+			return false
+		}
+		candidates[entry] = append(candidates[entry], i)
+	}
+	for i := 0; i < len(left); i += 2 {
+		entry, ok := fingerprintEntry(left[i], left[i+1], c.fingerprints)
+		if !ok {
+			return false
+		}
+		matches := candidates[entry]
+		match := slices.IndexFunc(matches, func(index int) bool {
+			return c.same(left[i], right[index]) && c.same(left[i+1], right[index+1])
+		})
+		if match < 0 {
+			return false
+		}
+		// Each entry can match once, including when digests collide.
+		last := len(matches) - 1
+		matches[match] = matches[last]
+		candidates[entry] = matches[:last]
 	}
 	return true
 }
