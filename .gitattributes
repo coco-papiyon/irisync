@@ -1,0 +1,2 @@
+# Keep Go formatting identical on Windows and Linux checkouts.
+*.go text eol=lf
