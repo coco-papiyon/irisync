@@ -27,14 +27,15 @@ func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 	edited.UpdatedAt = now.Add(time.Second)
 	selfApproval := comment(14, 2, "automation", "/approve-design")
 	shortSHA := comment(15, 1, "owner", "/approve-design "+sha[:7])
-	if result := findApproval([]designComment{request, earlier, wrongUser, oldRevision, edited, selfApproval, shortSHA}, cfg, request.Body, sha); result.ID != 0 {
+	renamedAuthor := comment(16, 2, "renamed-automation", "/approve-design")
+	if result := findApproval([]designComment{request, earlier, wrongUser, oldRevision, edited, selfApproval, shortSHA, renamedAuthor}, cfg, request.Body, sha); result.ID != 0 {
 		t.Fatalf("accepted invalid approval: %d", result.ID)
 	}
-	valid := comment(16, 1, "owner", "/approve-design")
+	valid := comment(17, 1, "owner", "/approve-design")
 	if result := findApproval([]designComment{valid, request}, cfg, request.Body, sha); result.ID != valid.ID {
 		t.Fatalf("did not accept valid approval: %d", result.ID)
 	}
-	newRequest := comment(17, 2, "automation", p.requestBody(path, sha, 2))
+	newRequest := comment(18, 2, "automation", p.requestBody(path, sha, 2))
 	if result := findApproval([]designComment{request, valid, newRequest}, cfg, newRequest.Body, sha); result.ID != 0 {
 		t.Fatalf("reused approval from prior review: %d", result.ID)
 	}
@@ -45,7 +46,7 @@ func TestDesignApprovalRequiresCurrentRequestAndAuthorizedUser(t *testing.T) {
 
 	legacyRequest := request
 	legacyRequest.Body += " " + sha
-	legacyApproval := comment(18, 1, "owner", "/approve-design "+sha)
+	legacyApproval := comment(19, 1, "owner", "/approve-design "+sha)
 	for _, approval := range []designComment{valid, legacyApproval} {
 		if result := findApproval([]designComment{legacyRequest, approval}, cfg, request.Body, sha); result.ID != approval.ID {
 			t.Fatalf("did not accept approval %d for existing request: got %d", approval.ID, result.ID)

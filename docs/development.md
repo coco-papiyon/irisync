@@ -61,7 +61,7 @@ Conductorを実行するWindowsユーザーで `codex login status` を確認す
 
 Polling Controllerは、Issue情報とローカルの設計文書をCodex CLIに渡してMarkdownを生成する。実行時はレビュー済みブランチのチェックアウトを使い、Issue本文には設計に必要な公開情報だけを記載する。設計書は `conductor/design/issue-N` ブランチの `docs/design/issues/issue-N.md` に保存され、Issueにコミット固定リンクと承認コマンドが表示される。
 
-承認者は最新の依頼から設計書を確認し、`/approve-design` だけを1行でIssueに新規コメントとして投稿する。リポジトリ操作用とは別の人間のアカウントを承認者とし、その数値IDを `design_approver_ids` に登録する。設計が更新されたら最新の承認依頼に対して投稿し直す。Polling Controllerは承認者・コメントID・依頼の設計コミットSHAをSQLiteに記録する。
+承認者は最新の依頼から設計書を確認し、`/approve-design` だけを1行でIssueに新規コメントとして投稿する。承認依頼の投稿者とは別の人間のアカウントを承認者とし、その数値IDを `design_approver_ids` に登録する。設計が更新されたら最新の承認依頼に対して投稿し直す。Polling Controllerは承認者・コメントID・依頼の設計コミットSHAをSQLiteに記録する。
 
 ## 承認済み設計の実装とPR作成
 

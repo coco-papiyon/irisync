@@ -16,11 +16,7 @@ type designComment struct {
 	Body      string
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	User      struct {
-		ID    int64
-		Login string
-		Type  string
-	}
+	User      githubIdentity
 }
 
 type designIssue struct {

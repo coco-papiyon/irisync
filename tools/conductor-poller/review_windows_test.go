@@ -10,9 +10,11 @@ import (
 )
 
 func TestReviewUsesAuthorizedRequestForTheCurrentHead(t *testing.T) {
-	cfg := config{GitHubLogin: "worker", DesignApproverIDs: []int64{7, 8}}
+	cfg := config{GitHubLogin: "operator", DesignApproverIDs: []int64{7, 8}}
+	pr := pullDetails{User: githubIdentity{ID: 8, Login: "worker"}}
+	pr.Head.SHA = "current"
 	request := humanReview{ID: 10, State: "CHANGES_REQUESTED", CommitID: "current"}
-	request.User.ID, request.User.Login, request.User.Type = 7, "human", "User"
+	request.User.ID, request.User.Login, request.User.Type = 7, "operator", "User"
 	stale := request
 	stale.ID, stale.CommitID = 11, "previous"
 	worker := request
@@ -20,12 +22,12 @@ func TestReviewUsesAuthorizedRequestForTheCurrentHead(t *testing.T) {
 	commentOnly := request
 	commentOnly.ID, commentOnly.State = 13, "COMMENTED"
 	reviews := []humanReview{stale, worker, request, commentOnly}
-	if got := requestedHumanReview(reviews, cfg, "current"); got.ID != request.ID {
+	if got := requestedHumanReview(reviews, cfg, pr); got.ID != request.ID {
 		t.Fatalf("unexpected review was selected: %d", got.ID)
 	}
 	approved := request
 	approved.ID, approved.State = 14, "APPROVED"
-	if got := requestedHumanReview(append(reviews, approved), cfg, "current"); got.ID != 0 {
+	if got := requestedHumanReview(append(reviews, approved), cfg, pr); got.ID != 0 {
 		t.Fatalf("obsolete change request was reused: %d", got.ID)
 	}
 }

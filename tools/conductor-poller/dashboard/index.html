@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Irisync Poller</title>
+  <link rel="stylesheet" href="/assets/dashboard.css">
+  <script defer src="/assets/dashboard.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">内容へ移動</a>
+  <aside class="sidebar">
+    <a class="brand" href="#main">Irisync <span>Poller</span></a>
+    <p id="repository" class="repository"></p>
+    <nav aria-label="ダッシュボード">
+      <a href="#issues">Issue</a>
+      <a href="#prs">Pull Request</a>
+    </nav>
+  </aside>
+  <main id="main">
+    <header class="page-header">
+      <div>
+        <h1>Poller ダッシュボード</h1>
+        <p id="last-updated" aria-live="polite">データを読み込んでいます</p>
+      </div>
+      <div class="filters">
+        <button id="settings-open" class="refresh" type="button">設定</button>
+        <button id="refresh" class="refresh" type="button">更新</button>
+      </div>
+    </header>
+    <dl class="metrics" aria-label="Project の概要">
+      <div><dt>未完了の Issue</dt><dd id="metric-open">—</dd></div>
+      <div><dt>着手待ち</dt><dd id="metric-ready">—</dd></div>
+      <div><dt>ブロック中</dt><dd id="metric-blocked">—</dd></div>
+      <div><dt>オープンな PR（表示分）</dt><dd id="metric-prs">—</dd></div>
+    </dl>
+    <section id="issues">
+      <header class="section-header">
+        <h2>Issue</h2>
+        <div class="filters">
+          <label class="visually-hidden" for="search">Issue 番号・件名</label>
+          <input id="search" type="search" placeholder="Issue 番号・件名で検索">
+          <label class="visually-hidden" for="status-filter">Project ステータス</label>
+          <select id="status-filter"><option value="">全ステータス</option></select>
+        </div>
+      </header>
+      <p id="issues-message" class="message" hidden></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th scope="col">件名</th><th scope="col">Project ステータス</th></tr></thead>
+        <tbody id="issues-body"></tbody>
+      </table></div>
+    </section>
+    <section id="prs">
+      <header class="section-header">
+        <h2>Pull Request</h2><p>オープン・更新順 最大50件</p>
+      </header>
+      <p id="prs-message" class="message" hidden></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th scope="col">件名</th><th scope="col">状態</th><th scope="col">CI</th><th scope="col">レビュー</th><th scope="col">更新日時</th></tr></thead>
+        <tbody id="prs-body"></tbody>
+      </table></div>
+    </section>
+  </main>
+  <dialog id="settings-dialog" class="detail-dialog settings-dialog" aria-labelledby="settings-title">
+    <header class="dialog-header">
+      <h2 id="settings-title">Poller の設定</h2>
+      <button id="settings-close" class="refresh" type="button">閉じる</button>
+    </header>
+    <form id="settings-form">
+      <p id="settings-file" class="settings-help"></p>
+      <fieldset id="settings-fields" disabled>
+        <legend>承認</legend>
+        <label for="settings-design-approver-ids">承認者の GitHub 数値 ID</label>
+        <input id="settings-design-approver-ids" name="DesignApproverIDs" type="text" aria-describedby="settings-number-help">
+        <label for="settings-approver-login">承認者の GitHub ログイン名</label>
+        <input id="settings-approver-login" name="DashboardApproverLogin" type="text" autocomplete="off" maxlength="39" aria-describedby="settings-login-help">
+        <p id="settings-login-help" class="settings-help"></p>
+        <fieldset>
+          <legend>Issue の処理</legend>
+          <label for="settings-poll-interval">ポーリング間隔</label>
+          <input id="settings-poll-interval" name="PollInterval" type="text" required aria-describedby="settings-interval-help">
+          <p id="settings-interval-help" class="settings-help">例は 30s、5m、1h です。</p>
+          <label class="settings-checkbox"><input name="AutoReady" type="checkbox"> Ready の Issue を自動処理する</label>
+          <p class="settings-help">有効にすると、テスト用 Issue を除く Ready の Issue が設計・実装の対象になります。</p>
+          <p id="settings-number-help" class="settings-help">複数の ID・Issue 番号はカンマか空白で区切ります。</p>
+          <label for="settings-test-issues">テスト用 Issue 番号</label>
+          <input id="settings-test-issues" name="TestIssueNumbers" type="text" aria-describedby="settings-number-help">
+          <label for="settings-design-issues">設計する Issue 番号</label>
+          <input id="settings-design-issues" name="DesignIssueNumbers" type="text" aria-describedby="settings-number-help">
+          <label for="settings-implementation-issues">実装する Issue 番号</label>
+          <input id="settings-implementation-issues" name="ImplementationIssueNumbers" type="text" aria-describedby="settings-number-help">
+        </fieldset>
+      </fieldset>
+      <p id="settings-status" class="message" role="status" hidden></p>
+      <div class="settings-actions">
+        <button id="settings-save" class="primary-action" type="submit" disabled>保存</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="item-dialog" class="detail-dialog" aria-labelledby="item-title">
+    <header class="dialog-header">
+      <h2 id="item-title"></h2>
+      <div id="item-actions" class="filters">
+        <a id="item-github" class="refresh" target="_blank" rel="noopener noreferrer">GitHub で開く</a>
+        <button id="item-close" class="refresh" type="button">閉じる</button>
+      </div>
+    </header>
+    <div id="item-status" class="item-status"></div>
+    <div class="detail-body">
+      <section aria-labelledby="item-discussion-title">
+        <div class="discussion-header">
+          <h3 id="item-discussion-title">GitHub のコメント</h3>
+          <button id="item-refresh" class="refresh" type="button">コメントを更新</button>
+        </div>
+        <div class="approval-panel">
+          <div id="item-approval-target"></div>
+          <button id="item-approve" class="primary-action" type="button" hidden></button>
+          <p id="item-approval-note" class="empty" role="status" hidden></p>
+        </div>
+        <p id="item-discussion-status" class="message" role="status" hidden></p>
+        <div id="item-comments" class="discussion"></div>
+      </section>
+      <h3>実行結果</h3>
+      <p id="item-results-message" class="message" role="status" hidden></p>
+      <div class="table-wrap"><table>
+        <thead><tr><th scope="col">工程</th><th scope="col">対象</th><th scope="col">結果</th><th scope="col">試行回数</th><th scope="col">記録日時</th><th scope="col">ログ</th></tr></thead>
+        <tbody id="item-results-body"></tbody>
+      </table></div>
+    </div>
+  </dialog>
+  <dialog id="log-dialog" aria-labelledby="log-title">
+    <header class="dialog-header">
+      <h2 id="log-title">ログ</h2>
+      <button id="log-close" class="refresh" type="button">閉じる</button>
+    </header>
+    <p id="log-note" class="message" hidden></p>
+    <pre id="log-content" tabindex="0"></pre>
+  </dialog>
+</body>
+</html>

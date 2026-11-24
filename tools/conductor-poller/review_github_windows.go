@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
 type pullDetails struct {
@@ -12,6 +13,7 @@ type pullDetails struct {
 	Merged    bool
 	Mergeable *bool
 	Draft     bool
+	User      githubIdentity
 	MergedBy  struct {
 		ID          int64
 		Login, Type string
@@ -19,14 +21,13 @@ type pullDetails struct {
 }
 
 type humanReview struct {
-	ID       int64
-	State    string
-	Body     string
-	CommitID string `json:"commit_id"`
-	User     struct {
-		ID          int64
-		Login, Type string
-	}
+	ID          int64
+	State       string
+	Body        string
+	CommitID    string    `json:"commit_id"`
+	SubmittedAt time.Time `json:"submitted_at"`
+	URL         string    `json:"html_url"`
+	User        githubIdentity
 }
 
 func (g githubProject) pullDetails(ctx context.Context, number int, branch string) (pullDetails, error) {
@@ -44,13 +45,18 @@ func (g githubProject) pullDetails(ctx context.Context, number int, branch strin
 }
 
 func authorizedHuman(cfg config, id int64, login, userType string) bool {
-	return userType == "User" && login != "" && !strings.EqualFold(login, cfg.GitHubLogin) && slices.Contains(cfg.DesignApproverIDs, id)
+	actor := githubIdentity{ID: id, Login: login, Type: userType}
+	return registeredApprover(cfg, actor) && !actor.sameAccount(githubIdentity{Login: cfg.GitHubLogin})
 }
 
-func requestedHumanReview(reviews []humanReview, cfg config, head string) humanReview {
+func registeredApprover(cfg config, actor githubIdentity) bool {
+	return actor.Type == "User" && actor.ID > 0 && actor.Login != "" && slices.Contains(cfg.DesignApproverIDs, actor.ID)
+}
+
+func requestedHumanReview(reviews []humanReview, cfg config, pr pullDetails) humanReview {
 	latest := make(map[int64]humanReview)
 	for _, review := range reviews {
-		if review.CommitID != head || !authorizedHuman(cfg, review.User.ID, review.User.Login, review.User.Type) {
+		if review.CommitID != pr.Head.SHA || !registeredApprover(cfg, review.User) || review.User.sameAccount(pr.User) {
 			continue
 		}
 		switch review.State {
@@ -70,12 +76,12 @@ func requestedHumanReview(reviews []humanReview, cfg config, head string) humanR
 }
 
 func (g githubProject) humanRequest(ctx context.Context, pr pullDetails) (humanReview, error) {
-	var pages [][]humanReview
 	pull := fmt.Sprintf("repos/%s/pulls/%d", g.cfg.Repository, pr.Number)
-	if err := g.getJSON(ctx, &pages, pull+"/reviews?per_page=100", "--paginate", "--slurp"); err != nil {
+	reviews, err := g.pullReviews(ctx, pull)
+	if err != nil {
 		return humanReview{}, err
 	}
-	request := requestedHumanReview(slices.Concat(pages...), g.cfg, pr.Head.SHA)
+	request := requestedHumanReview(reviews, g.cfg, pr)
 	if request.ID == 0 {
 		return request, nil
 	}
@@ -95,6 +101,14 @@ func (g githubProject) humanRequest(ctx context.Context, pr pullDetails) (humanR
 	}
 	request.Body = strings.TrimSpace(body.String())
 	return request, nil
+}
+
+func (g githubProject) pullReviews(ctx context.Context, pull string) ([]humanReview, error) {
+	var pages [][]humanReview
+	if err := g.getJSON(ctx, &pages, pull+"/reviews?per_page=100", "--paginate", "--slurp"); err != nil {
+		return nil, err
+	}
+	return slices.Concat(pages...), nil
 }
 
 type prCheck struct {

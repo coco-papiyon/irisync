@@ -21,7 +21,7 @@ const projectQuery = `query($id:ID!, $after:String) {
             ... on ProjectV2ItemFieldSingleSelectValue { name }
           }
           content {
-            ... on Issue { id number closed repository { nameWithOwner } }
+            ... on Issue { id number title closed repository { nameWithOwner } }
           }
         }
       }
@@ -83,9 +83,9 @@ func isReviewStatus(status string) bool {
 }
 
 type projectIssue struct {
-	ID, ItemID, Repository, Status string
-	Number                         int
-	Closed, Archived               bool
+	ID, ItemID, Repository, Status, Title string
+	Number                                int
+	Closed, Archived                      bool
 }
 
 type projectPage struct {
@@ -103,6 +103,7 @@ type projectPage struct {
 				Content          struct {
 					ID         string
 					Number     int
+					Title      string
 					Closed     bool
 					Repository struct{ NameWithOwner string }
 				}
@@ -144,7 +145,7 @@ func (g githubProject) projectIssues(ctx context.Context) ([]projectIssue, error
 				continue
 			}
 			issues = append(issues, projectIssue{
-				ID: issue.ID, ItemID: item.ID, Number: issue.Number, Status: item.FieldValueByName.Name,
+				ID: issue.ID, ItemID: item.ID, Number: issue.Number, Title: issue.Title, Status: item.FieldValueByName.Name,
 				Repository: issue.Repository.NameWithOwner, Closed: issue.Closed, Archived: item.IsArchived,
 			})
 		}
@@ -217,6 +218,11 @@ func (g githubProject) ghOutput(ctx context.Context, args ...string) ([]byte, er
 type githubIdentity struct {
 	Login string
 	ID    int64 `json:"id"`
+	Type  string
+}
+
+func (a githubIdentity) sameAccount(b githubIdentity) bool {
+	return (a.ID > 0 && a.ID == b.ID) || (a.Login != "" && strings.EqualFold(a.Login, b.Login))
 }
 
 func (g githubProject) automationIdentity(ctx context.Context) (githubIdentity, error) {

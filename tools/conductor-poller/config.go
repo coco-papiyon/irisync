@@ -34,6 +34,8 @@ type config struct {
 	ParallelRuns               int           `yaml:"parallel_runs"`
 	MaxAttempts                int           `yaml:"max_attempts"`
 	DataDir                    string        `yaml:"data_dir"`
+	DashboardAddr              string        `yaml:"dashboard_addr"`
+	DashboardApproverLogin     string        `yaml:"dashboard_approver_login"`
 	WorkDir                    string        `yaml:"work_dir"`
 	AutoReady                  bool          `yaml:"auto_ready"`
 	TestIssueNumbers           []int         `yaml:"test_issue_numbers"`
@@ -45,6 +47,15 @@ type config struct {
 }
 
 func loadConfig(path string) (config, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return config{}, err
+	}
+	defer file.Close()
+	return decodeConfig(path, file)
+}
+
+func decodeConfig(path string, input io.Reader) (config, error) {
 	cfg := config{
 		GitHubAuthMode: githubAuthGH,
 		PollInterval:   5 * time.Minute, GitHubTimeout: 30 * time.Second,
@@ -52,12 +63,7 @@ func loadConfig(path string) (config, error) {
 		DataDir: ".local", WorkDir: "..", DesignTimeout: 15 * time.Minute,
 		ImplementationTimeout: 30 * time.Minute,
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return cfg, err
-	}
-	defer file.Close()
-	decoder := yaml.NewDecoder(file)
+	decoder := yaml.NewDecoder(input)
 	decoder.KnownFields(true)
 	if err := decoder.Decode(&cfg); err != nil {
 		return cfg, fmt.Errorf("read config: %w", err)

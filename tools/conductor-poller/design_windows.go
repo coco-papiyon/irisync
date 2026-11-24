@@ -241,20 +241,20 @@ func findApproval(comments []designComment, cfg config, request, sha string) des
 	if !validCommitSHA(sha) {
 		return designComment{}
 	}
-	var requestID int64
+	var requestComment designComment
 	for _, c := range comments {
-		if c.ID > requestID && matchesDesignRequest(c, cfg, request, sha) {
-			requestID = c.ID
+		if c.ID > requestComment.ID && matchesDesignRequest(c, cfg, request, sha) {
+			requestComment = c
 		}
 	}
 	var result designComment
-	if requestID == 0 {
+	if requestComment.ID == 0 {
 		return result
 	}
 	for _, c := range comments {
 		body := strings.TrimSpace(c.Body)
-		if c.ID > requestID && c.ID > result.ID && c.CreatedAt.Equal(c.UpdatedAt) &&
-			authorizedHuman(cfg, c.User.ID, c.User.Login, c.User.Type) &&
+		if c.ID > requestComment.ID && c.ID > result.ID && c.CreatedAt.Equal(c.UpdatedAt) &&
+			registeredApprover(cfg, c.User) && !c.User.sameAccount(requestComment.User) &&
 			(body == designApprovalCommand || body == designApprovalCommand+" "+sha) {
 			result = c
 		}

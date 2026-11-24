@@ -11,6 +11,9 @@ workflow_timeout: 2m
 parallel_runs: 1
 max_attempts: 3
 data_dir: .local
+dashboard_addr: ''
+# 空欄では app モードで github_project_login、gh モードで github_login の保存済み認証を使用。
+dashboard_approver_login: ''
 work_dir: ..
 auto_ready: false
 test_issue_numbers: []

@@ -42,17 +42,21 @@ func main() {
 	}
 	configPath := flag.String("config", ".conductor/poller.example.yaml", "YAML configuration file")
 	once := flag.Bool("once", false, "poll once and wait for eligible runs")
+	dashboardOnly := flag.Bool("dashboard-only", false, "serve the dashboard without running issue workflows")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
-	if err := run(ctx, *configPath, *once); err != nil && !errors.Is(err, context.Canceled) {
+	if err := run(ctx, *configPath, *once, *dashboardOnly); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Error("poller stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, configPath string, once bool) error {
+func run(ctx context.Context, configPath string, once, dashboardOnly bool) error {
+	if once && dashboardOnly {
+		return fmt.Errorf("-once and -dashboard-only cannot be used together")
+	}
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return err
@@ -65,6 +69,9 @@ func run(ctx context.Context, configPath string, once bool) error {
 		return err
 	}
 	cfg = gh.cfg
+	if dashboardOnly {
+		return runDashboardOnly(ctx, cfg, gh, configPath)
+	}
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
 		return err
 	}
@@ -73,6 +80,13 @@ func run(ctx context.Context, configPath string, once bool) error {
 		return err
 	}
 	defer closeState()
+	if cfg.DashboardAddr != "" {
+		stop, err := startDashboard(ctx, cfg.DashboardAddr, gh, db.db, false, configPath)
+		if err != nil {
+			return err
+		}
+		defer stop()
+	}
 	conductor, err := newConductor(cfg)
 	if err != nil {
 		return err
