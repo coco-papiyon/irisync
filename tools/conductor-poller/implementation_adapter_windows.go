@@ -40,12 +40,20 @@ func implementationEditBlocked(dir string) bool {
 	return strings.HasPrefix(readFeedback(dir, "step-error.txt"), editBlockedPrefix)
 }
 
+func implementationStepFeedback(dir string) string {
+	if codexAttemptLimited(dir) {
+		return ""
+	}
+	return readFeedback(dir, "step-error.txt")
+}
+
 type implementationManifest struct {
 	Worktree, Base, Branch, Design, Feedback, Validator string
 	ConductorExecutable                                 string
 	ResumeTree                                          string
 	PreviousReviewTree                                  string
 	IssueRequirements                                   string
+	VerifiedPrerequisites                               *verifiedPrerequisites
 	ConflictPaths                                       []string
 }
 
@@ -98,6 +106,15 @@ func (m *implementationManifest) reuseStagedImplementation(ctx context.Context) 
 	}
 }
 
+func (m *implementationManifest) resumeLimitedReview(previous string) {
+	if !codexAttemptLimited(previous) {
+		return
+	}
+	if tree, err := os.ReadFile(filepath.Join(previous, "validated-tree")); err == nil && m.checkTree(string(tree)) == nil {
+		m.ResumeTree = string(tree)
+	}
+}
+
 func (m implementationManifest) checkWorktree() error {
 	root, err := gitOutput(context.Background(), m.Worktree, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -144,10 +161,11 @@ func (m implementationManifest) edit(dir string) error {
 		return err
 	}
 	defer log.Close()
-	cmd.Stdout, cmd.Stderr = log, log
+	var stderr codexErrorStream
+	cmd.Stdout, cmd.Stderr = log, io.MultiWriter(log, &stderr)
 	isolateCommand(cmd, dir)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("Codex edit: %w", err)
+		return codexExecError(dir, "Codex edit", stderr.reached(), err)
 	}
 	data, err := os.ReadFile(response)
 	if err != nil {
@@ -181,10 +199,11 @@ func (m implementationManifest) editPayload() ([]byte, error) {
 			return nil, fmt.Errorf("correction stopped: staged source diff exceeds the edit input limit")
 		}
 	}
-	return json.Marshal(map[string]string{
+	return json.Marshal(map[string]any{
 		"approved_design": m.Design, "issue_requirements": m.IssueRequirements,
-		"previous_feedback":     dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]"),
-		"staged_diff_from_base": dashboardSecrets.ReplaceAllString(string(diff), "[redacted]"),
+		"verified_prerequisites": m.VerifiedPrerequisites,
+		"previous_feedback":      dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]"),
+		"staged_diff_from_base":  dashboardSecrets.ReplaceAllString(string(diff), "[redacted]"),
 	})
 }
 
@@ -322,8 +341,9 @@ func (m implementationManifest) review(dir string) error {
 	if len(diff) > 256<<10 {
 		return fmt.Errorf("implementation diff exceeds the self-review input limit")
 	}
-	input := map[string]string{"issue_requirements": m.IssueRequirements, "approved_design": m.Design,
-		"diff": string(diff), "previous_feedback": dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]")}
+	input := map[string]any{"issue_requirements": m.IssueRequirements, "approved_design": m.Design,
+		"diff": string(diff), "previous_feedback": dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]"),
+		"verified_prerequisites": m.VerifiedPrerequisites}
 	if validCommitSHA(m.PreviousReviewTree) {
 		delta, err := gitRawOutput(context.Background(), m.Worktree, "diff", "--no-ext-diff",
 			"--no-textconv", "--no-color", m.PreviousReviewTree, string(tree))
@@ -335,7 +355,7 @@ func (m implementationManifest) review(dir string) error {
 	if err != nil {
 		return err
 	}
-	prompt := "実装後の自己レビューを行う。前回の指摘があれば先に解消を確認し、承認済み設計の同じ基準に沿って全体を判定する。ステージ済みの差分はローカル検証を通過している。PR 公開前のため GitHub 上の CI 結果やレビュー記録は確認対象外とする。"
+	prompt := "実装後の自己レビューを行う。前回の指摘があれば先に解消を確認し、承認済み設計の同じ基準に沿って全体を判定する。ステージ済みの差分はローカル検証を通過している。verified_prerequisites があれば、着手条件には Poller が確認したこの結果を使う。PR 公開前のため GitHub 上の CI 結果やレビュー記録は確認対象外とする。"
 	verdict, err := codexReview(dir, prompt, payload)
 	if err != nil {
 		return err
@@ -365,10 +385,11 @@ func codexReview(dir, prompt string, payload []byte) (reviewVerdict, error) {
 		return verdict, err
 	}
 	defer log.Close()
-	cmd.Stdout, cmd.Stderr = log, log
+	var stderr codexErrorStream
+	cmd.Stdout, cmd.Stderr = log, io.MultiWriter(log, &stderr)
 	isolateCommand(cmd, dir)
 	if err := cmd.Run(); err != nil {
-		return verdict, fmt.Errorf("Codex review: %w", err)
+		return verdict, codexExecError(dir, "Codex review", stderr.reached(), err)
 	}
 	data, err := os.ReadFile(response)
 	if err != nil {

@@ -1,11 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -85,27 +89,59 @@ func (g githubProject) mutate(ctx context.Context, method, endpoint string, inpu
 	ctx, cancel := context.WithTimeout(ctx, g.cfg.GitHubTimeout)
 	defer cancel()
 	if _, err := g.automationIdentity(ctx); err != nil {
-		return fmt.Errorf("identify GitHub account before %s: %w", method, err)
+		return fmt.Errorf("identify GitHub account before %s %q: %w", method, endpoint, err)
 	}
 	payload, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
-	cmd, err := g.ghCommand(ctx, "api", "--hostname", "github.com", endpoint, "--method", method, "--input", "-")
+	cmd, err := g.ghCommand(ctx, "api", "--hostname", "github.com", endpoint, "--method", method, "--input", "-", "--include")
 	if err != nil {
 		return err
 	}
 	cmd.Stdin = bytes.NewReader(payload)
+	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
+	if ctx.Err() != nil {
+		err = ctx.Err()
+	}
+	return githubMutationResult(method, endpoint, out, err)
+}
+
+var githubRequestID = regexp.MustCompile(`^[0-9A-Fa-f]{1,16}(?::[0-9A-Fa-f]{1,16}){3,5}$`)
+
+func githubMutationResult(method, endpoint string, output []byte, commandErr error) error {
+	reader := bufio.NewReader(bytes.NewReader(output))
+	response, err := http.ReadResponse(reader, nil)
 	if err != nil {
-		// The response can contain the input Markdown or Issue comment.
-		return fmt.Errorf("GitHub %s request failed: %w", method, err)
+		if commandErr != nil {
+			return fmt.Errorf("GitHub %s %q: no HTTP response: %w", method, endpoint, commandErr)
+		}
+		return fmt.Errorf("GitHub %s %q: invalid HTTP response headers", method, endpoint)
+	}
+	// Log only the status code and the validated request ID. The response
+	// body and other headers may echo credentials or submitted content.
+	result := fmt.Sprintf("GitHub %s %q: HTTP %d", method, endpoint, response.StatusCode)
+	if id := response.Header.Get("X-GitHub-Request-Id"); githubRequestID.MatchString(id) {
+		result += " (request ID " + id + ")"
+	}
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return fmt.Errorf("%s: request failed", result)
 	}
 	if endpoint == "graphql" {
-		var response struct{ Errors []json.RawMessage }
-		if err := json.Unmarshal(out, &response); err != nil || len(response.Errors) > 0 {
-			return fmt.Errorf("GitHub rejected the Projects mutation")
+		// gh writes a decoded body after the headers, even if the HTTP
+		// headers describe transfer or content encodings.
+		var message struct{ Errors []json.RawMessage }
+		body, err := io.ReadAll(reader)
+		if err != nil || json.Unmarshal(body, &message) != nil {
+			return fmt.Errorf("%s: invalid GraphQL response", result)
 		}
+		if len(message.Errors) > 0 {
+			return fmt.Errorf("%s: GraphQL mutation rejected", result)
+		}
+	}
+	if commandErr != nil {
+		return fmt.Errorf("%s: %w", result, commandErr)
 	}
 	return nil
 }
@@ -187,13 +223,17 @@ func (g githubProject) setDesignStatus(ctx context.Context, item projectIssue, t
 	}
 	for _, option := range data.Project.Field.Options {
 		if option.Name == target {
-			return g.mutate(ctx, "POST", "graphql", map[string]any{
+			err := g.mutate(ctx, "POST", "graphql", map[string]any{
 				"query": `mutation($input:UpdateProjectV2ItemFieldValueInput!){updateProjectV2ItemFieldValue(input:$input){clientMutationId}}`,
 				"variables": map[string]any{"input": map[string]any{
 					"projectId": g.cfg.ProjectID, "itemId": item.ItemID, "fieldId": data.Project.Field.ID,
 					"value": map[string]string{"singleSelectOptionId": option.ID},
 				}},
 			})
+			if err != nil {
+				return fmt.Errorf("update Project Status %q to %q: %w", item.Status, target, err)
+			}
+			return nil
 		}
 	}
 	return fmt.Errorf("Status option %q is unavailable", target)

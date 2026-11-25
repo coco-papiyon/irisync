@@ -39,6 +39,21 @@ CREATE TABLE IF NOT EXISTS active_workflows (
 	started_at TEXT NOT NULL,
 	process_id INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS codex_usage (
+	id INTEGER PRIMARY KEY CHECK (id = 1),
+	windows TEXT NOT NULL DEFAULT '{}',
+	checked_at INTEGER NOT NULL DEFAULT 0,
+	refresh_failed INTEGER NOT NULL DEFAULT 0,
+	paused INTEGER NOT NULL DEFAULT 0,
+	detected_at INTEGER NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO codex_usage(id) VALUES (1);
+CREATE TABLE IF NOT EXISTS codex_deferrals (
+	phase TEXT NOT NULL,
+	work_key TEXT NOT NULL,
+	attempt INTEGER NOT NULL,
+	PRIMARY KEY (phase, work_key, attempt)
+);
 CREATE TABLE IF NOT EXISTS designs (
     issue_id TEXT PRIMARY KEY,
     attempts INTEGER NOT NULL DEFAULT 0,

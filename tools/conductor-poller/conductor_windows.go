@@ -73,6 +73,9 @@ func (r conductorRunner) run(ctx context.Context, logPath string) runResult {
 }
 
 func classifyRun(ctx context.Context, err error) runResult {
+	if errors.Is(err, errCodexLimited) {
+		return runResult{"codex_limited", -1, err}
+	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return runResult{"timed_out", -1, err}
 	}

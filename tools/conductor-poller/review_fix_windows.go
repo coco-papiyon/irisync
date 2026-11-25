@@ -49,21 +49,37 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		return err
 	}
 	previous := filepath.Join(workDir, fmt.Sprintf("attempt-%d", fix.attempts))
+	if fix.attempts > 0 && codexAttemptLimited(previous) {
+		if err := p.deferCodexAttempt(ctx, "pr fix", fmt.Sprint(fix.id), fix.attempts); err != nil {
+			return err
+		}
+	}
 	if implementationEditBlocked(previous) {
 		return p.github.setDesignStatus(ctx, item, "Blocked")
 	}
 	tree, err := os.ReadFile(filepath.Join(previous, "approved-tree"))
 	if err != nil || job.checkTree(string(tree)) != nil {
 		var total int
-		if err := p.db.db.QueryRowContext(ctx, "SELECT coalesce(sum(attempts),0) FROM pr_fixes WHERE pr_number = ? AND kind = ?",
+		if err := p.db.db.QueryRowContext(ctx, `
+			SELECT coalesce(sum(attempts - (
+				SELECT count(*) FROM codex_deferrals WHERE phase = 'pr fix' AND work_key = CAST(pr_fixes.id AS TEXT)
+			)), 0) FROM pr_fixes WHERE pr_number = ? AND kind = ?`,
 			pr.Number, kind).Scan(&total); err != nil {
 			return err
 		}
 		if total >= reviewFixLimit(kind) {
 			return p.github.setDesignStatus(ctx, item, "Blocked")
 		}
-		job.Feedback += "\n" + readFeedback(previous, "step-error.txt") + "\n" + readPreviousReview(previous) +
+		if err := p.requireCodex(ctx); err != nil {
+			return err
+		}
+		job.VerifiedPrerequisites, err = p.github.verifyImplementationPrerequisites(ctx, item)
+		if err != nil {
+			return err
+		}
+		job.Feedback += "\n" + implementationStepFeedback(previous) + "\n" + readPreviousReview(previous) +
 			"\n" + previousValidationFailure(workDir, fix.attempts)
+		job.resumeLimitedReview(previous)
 		job.IssueRequirements, err = p.github.reviewIssueRequirements(ctx, item)
 		if err != nil {
 			return err
@@ -81,6 +97,9 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		}
 		activity := workflowActivity{Issue: item.Number, PR: pr.Number, Attempt: fix.attempts + 1, Phase: "pr fix"}
 		err := p.runReviewWorkflow(ctx, "implement.yaml", dir, limit, job, activity)
+		if errors.Is(err, errCodexLimited) {
+			return p.deferCodexAttempt(ctx, "pr fix", fmt.Sprint(fix.id), activity.Attempt)
+		}
 		if ctx.Err() == nil && implementationEditBlocked(dir) {
 			return p.github.setDesignStatus(ctx, item, "Blocked")
 		}

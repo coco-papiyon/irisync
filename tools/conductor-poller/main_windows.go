@@ -114,6 +114,19 @@ func (p *poller) loop(ctx context.Context, once bool) error {
 	p.activeDesigns = make(map[string]bool)
 	p.retryAfter = make(map[string]time.Time)
 	defer p.workers.Wait()
+	p.refreshCodexUsage(ctx)
+	if !once {
+		monitorCtx, cancel := context.WithCancel(ctx)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			p.watchCodexUsage(monitorCtx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+	}
 	return runPollingLoop(ctx, once, p.cfg.PollInterval, p.workflowDone, p.poll)
 }
 

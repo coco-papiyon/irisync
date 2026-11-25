@@ -132,6 +132,11 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 		return "", err
 	}
 	previous := filepath.Join(workRoot, fmt.Sprintf("attempt-%d", record.attempts))
+	if record.attempts > 0 && codexAttemptLimited(previous) {
+		if err := p.deferCodexAttempt(ctx, "implementation attempt", item.ID+":"+ref.Head, record.attempts); err != nil {
+			return "", err
+		}
+	}
 	retryGranted := record.attempts > 0 && record.limit-record.attempts == implementationAttempts
 	stopAfterEdit := func() error {
 		_, err := p.db.db.ExecContext(ctx, "UPDATE implementations SET attempt_limit = attempts WHERE issue_id = ? AND design_sha = ?", item.ID, ref.Head)
@@ -156,7 +161,7 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 		Worktree: worktree, Branch: branch, Base: record.base, Design: ref.Markdown,
 		ConductorExecutable: p.conductor.executable,
 		Validator:           filepath.Join(p.cfg.WorkDir, ".conductor", "scripts", "validate-implementation.ps1"),
-		Feedback:            strings.TrimSpace(readFeedback(previous, "step-error.txt") + "\n" + previousReview + "\n" + validationFailure),
+		Feedback:            strings.TrimSpace(implementationStepFeedback(previous) + "\n" + previousReview + "\n" + validationFailure),
 	}
 	if previousReview != "" {
 		job.PreviousReviewTree = readFeedback(reviewDir, "validated-tree")
@@ -167,6 +172,14 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 	if record.attempts >= record.limit {
 		return "", errImplementationAttempts
 	}
+	if err := p.requireCodex(ctx); err != nil {
+		return "", err
+	}
+	prerequisites, err := p.github.verifyImplementationPrerequisites(ctx, item)
+	if err != nil {
+		return "", err
+	}
+	job.VerifiedPrerequisites = prerequisites
 	requirements, err := p.github.reviewIssueRequirements(ctx, item)
 	if err != nil {
 		return "", err
@@ -176,6 +189,7 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 	if retryGranted && previousReview == "" && (!implementationEditBlocked(previous) || validationFailure != "") {
 		job.reuseStagedImplementation(ctx)
 	}
+	job.resumeLimitedReview(previous)
 	dir := filepath.Join(workRoot, fmt.Sprintf("attempt-%d", attempt))
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
@@ -205,6 +219,9 @@ func (p *poller) runImplementation(ctx context.Context, item projectIssue, ref d
 	defer func() { finishActivity(classifyRun(ctx, runErr)) }()
 	err = runInJob(ctx, p.cfg.WorkDir, log, p.conductor.executable, "--silent", "run", workflow, "--no-interactive",
 		"--input", "adapter="+self, "--input", "manifest="+manifestPath)
+	if codexAttemptLimited(dir) {
+		return "", p.deferCodexAttempt(ctx, "implementation attempt", item.ID+":"+ref.Head, attempt)
+	}
 	if ctx.Err() == nil && implementationEditBlocked(dir) {
 		return "", stopAfterEdit()
 	}

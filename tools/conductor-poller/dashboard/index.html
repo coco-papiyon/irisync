@@ -15,6 +15,7 @@
     <nav aria-label="ダッシュボード">
       <a href="#issues">Issue</a>
       <a href="#prs">Pull Request</a>
+      <a href="#codex-usage">Codex 利用状況</a>
     </nav>
   </aside>
   <main id="main">
@@ -34,6 +35,14 @@
       <div><dt>ブロック中</dt><dd id="metric-blocked">—</dd></div>
       <div><dt>オープンな PR（表示分）</dt><dd id="metric-prs">—</dd></div>
     </dl>
+    <section id="codex-usage" aria-labelledby="codex-usage-title">
+      <header class="section-header">
+        <h2 id="codex-usage-title">Codex 利用状況</h2>
+        <p id="codex-usage-checked"></p>
+      </header>
+      <div id="codex-usage-windows" class="codex-windows" hidden></div>
+      <p id="codex-usage-status" class="message" role="status" hidden></p>
+    </section>
     <section id="issues">
       <header class="section-header">
         <h2>Issue</h2>

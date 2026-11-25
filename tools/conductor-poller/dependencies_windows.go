@@ -8,8 +8,8 @@ import (
 	"strings"
 )
 
-// Only dependency IDs are requested. GitHub's Issue closed state does not
-// determine completion, which comes from the configured Project's Status.
+// GitHub's Issue closed state does not determine completion, which comes from
+// the configured Project's Status.
 const dependenciesQuery = `query($ids:[ID!]!, $after:String) {
   viewer { login }
   nodes(ids:$ids) {
@@ -18,7 +18,7 @@ const dependenciesQuery = `query($ids:[ID!]!, $after:String) {
       issueDependenciesSummary { totalBlockedBy }
       blockedBy(first:100, after:$after) {
         pageInfo { endCursor hasNextPage }
-        nodes { id }
+        nodes { id number repository { nameWithOwner } }
       }
     }
   }
@@ -32,8 +32,25 @@ type dependencyPage struct {
 			EndCursor   string
 			HasNextPage bool
 		}
-		Nodes []struct{ ID string }
+		Nodes []dependencyIssue
 	}
+}
+
+type dependencyIssue struct {
+	ID         string
+	Number     int
+	Repository struct{ NameWithOwner string }
+}
+
+type verifiedPrerequisites struct {
+	ProjectNumber int32                  `json:"project_number,omitempty"`
+	BlockedBy     []verifiedPrerequisite `json:"blocked_by"`
+}
+
+type verifiedPrerequisite struct {
+	Repository string `json:"repository"`
+	Number     int    `json:"number"`
+	Status     string `json:"status"`
 }
 
 func (g githubProject) promotePending(ctx context.Context, issues []projectIssue) (int, error) {
@@ -127,24 +144,83 @@ func (g githubProject) dependencyPages(ctx context.Context, ids []string, after 
 }
 
 func (g githubProject) dependenciesDone(ctx context.Context, page dependencyPage, statuses map[string]string) (bool, error) {
-	if page.IssueDependenciesSummary == nil || page.IssueDependenciesSummary.TotalBlockedBy == 0 {
-		return false, nil
+	prerequisites, complete, err := g.listDependencies(ctx, page)
+	if err != nil || !complete || len(prerequisites) == 0 {
+		return false, err
+	}
+	for _, prerequisite := range prerequisites {
+		if status, known := statuses[prerequisite.ID]; known && status != "Done" {
+			return false, nil
+		}
+	}
+	for _, prerequisite := range prerequisites {
+		status, known := statuses[prerequisite.ID]
+		if !known {
+			status, err = g.projectStatusForIssue(ctx, prerequisite.ID)
+			if err != nil {
+				return false, err
+			}
+			statuses[prerequisite.ID] = status
+		}
+		if status != "Done" {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+func (g githubProject) verifyImplementationPrerequisites(ctx context.Context, item projectIssue) (*verifiedPrerequisites, error) {
+	pages, err := g.dependencyPages(ctx, []string{item.ID}, "")
+	if err != nil {
+		return nil, fmt.Errorf("read issue #%d Blocked by: %w", item.Number, err)
+	}
+	prerequisites, complete, err := g.listDependencies(ctx, pages[item.ID])
+	if err != nil {
+		return nil, fmt.Errorf("read issue #%d Blocked by: %w", item.Number, err)
+	}
+	if !complete {
+		return nil, fmt.Errorf("could not verify all Blocked by entries for issue #%d", item.Number)
+	}
+	verified := &verifiedPrerequisites{ProjectNumber: g.cfg.ProjectNumber, BlockedBy: make([]verifiedPrerequisite, 0, len(prerequisites))}
+	for _, prerequisite := range prerequisites {
+		repository := prerequisite.Repository.NameWithOwner
+		if prerequisite.Number <= 0 || repository == "" {
+			return nil, fmt.Errorf("could not identify a Blocked by entry for issue #%d", item.Number)
+		}
+		status, err := g.projectStatusForIssue(ctx, prerequisite.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read Project status of prerequisite %s#%d: %w", repository, prerequisite.Number, err)
+		}
+		if status != "Done" {
+			return nil, fmt.Errorf("waiting for prerequisite %s#%d to be Done in the configured Project (status %q)", repository, prerequisite.Number, status)
+		}
+		verified.BlockedBy = append(verified.BlockedBy, verifiedPrerequisite{Repository: repository, Number: prerequisite.Number, Status: status})
+	}
+	return verified, nil
+}
+
+func (g githubProject) listDependencies(ctx context.Context, page dependencyPage) ([]dependencyIssue, bool, error) {
+	if page.ID == "" || page.IssueDependenciesSummary == nil {
+		return nil, false, nil
 	}
 	total := page.IssueDependenciesSummary.TotalBlockedBy
 	issueID := page.ID
 	seen := make(map[string]bool)
+	var prerequisites []dependencyIssue
 	after := ""
 	for {
 		if page.BlockedBy == nil || page.IssueDependenciesSummary == nil || page.IssueDependenciesSummary.TotalBlockedBy != total {
-			return false, nil
+			return nil, false, nil
 		}
 		countBefore := len(seen)
 		for _, prerequisite := range page.BlockedBy.Nodes {
-			status, known := statuses[prerequisite.ID]
-			if prerequisite.ID == "" || prerequisite.ID == issueID || known && status != "Done" {
-				return false, nil
+			if prerequisite.ID == "" || prerequisite.ID == issueID {
+				return nil, false, nil
 			}
-			seen[prerequisite.ID] = true
+			if !seen[prerequisite.ID] {
+				prerequisites = append(prerequisites, prerequisite)
+				seen[prerequisite.ID] = true
+			}
 		}
 		next := page.BlockedBy.PageInfo
 		if !next.HasNextPage {
@@ -152,33 +228,19 @@ func (g githubProject) dependenciesDone(ctx context.Context, page dependencyPage
 			break
 		}
 		if next.EndCursor == "" || next.EndCursor == after || len(seen) == countBefore || len(seen) >= total {
-			return false, fmt.Errorf("issue dependency pagination did not advance")
+			return nil, false, fmt.Errorf("issue dependency pagination did not advance")
 		}
 		after = next.EndCursor
 		pages, err := g.dependencyPages(ctx, []string{issueID}, after)
 		if err != nil {
-			return false, err
+			return nil, false, err
 		}
 		page = pages[issueID]
 	}
 	if len(seen) != total {
-		return false, nil
+		return nil, false, nil
 	}
-	for id := range seen {
-		status, known := statuses[id]
-		if !known {
-			var err error
-			status, err = g.projectStatusForIssue(ctx, id)
-			if err != nil {
-				return false, err
-			}
-			statuses[id] = status
-		}
-		if status != "Done" {
-			return false, nil
-		}
-	}
-	return true, nil
+	return prerequisites, true, nil
 }
 
 // The main project query lists active items. Look up an absent prerequisite

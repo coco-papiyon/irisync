@@ -15,8 +15,8 @@ import (
 )
 
 type designRecord struct {
-	attempts  int
-	generated string
+	attempts, deferred int
+	generated          string
 }
 
 func (p *poller) launchDesign(ctx context.Context, item projectIssue) bool {
@@ -38,7 +38,7 @@ func (p *poller) launchDesign(ctx context.Context, item projectIssue) bool {
 			p.designMu.Lock()
 			delete(p.activeDesigns, item.ID)
 			// A review without a retry budget must not immediately re-run on failure.
-			if completion.ran && workerError != nil && !completion.boundedAttempt {
+			if completion.ran && workerError != nil && !errors.Is(workerError, errCodexLimited) && !completion.boundedAttempt {
 				p.retryAfter[item.ID] = time.Now().Add(p.cfg.PollInterval)
 			}
 			p.designMu.Unlock()
@@ -55,7 +55,7 @@ func (p *poller) launchDesign(ctx context.Context, item projectIssue) bool {
 			advance = p.advanceImplementation
 		}
 		workerError = advance(workerCtx, item)
-		if workerError != nil {
+		if workerError != nil && !errors.Is(workerError, errCodexLimited) {
 			slog.Warn("issue workflow did not advance", "issue", item.Number, "error", workerError)
 		}
 	}()
@@ -73,8 +73,10 @@ func (p *poller) advanceDesign(ctx context.Context, item projectIssue) error {
 		item.Status = "Designing"
 	}
 	var record designRecord
-	err := p.db.db.QueryRowContext(ctx, "SELECT attempts, generated_markdown FROM designs WHERE issue_id = ?", item.ID).
-		Scan(&record.attempts, &record.generated)
+	err := p.db.db.QueryRowContext(ctx, `
+		SELECT attempts, generated_markdown,
+			(SELECT count(*) FROM codex_deferrals WHERE phase = 'design' AND work_key = designs.issue_id)
+		FROM designs WHERE issue_id = ?`, item.ID).Scan(&record.attempts, &record.generated, &record.deferred)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil
 	}
@@ -87,7 +89,12 @@ func (p *poller) advanceDesign(ctx context.Context, item projectIssue) error {
 		return p.reviewDesign(ctx, item, branch, path)
 	}
 	if record.generated == "" {
-		if record.attempts >= p.cfg.MaxAttempts {
+		if record.attempts > 0 {
+			if err := p.recoverDesignDeferral(ctx, item, record.attempts); err != nil {
+				return err
+			}
+		}
+		if record.attempts-record.deferred >= p.cfg.MaxAttempts {
 			return p.github.setDesignStatus(ctx, item, "Blocked")
 		}
 		if err := p.generateDesign(ctx, item, record.attempts+1); err != nil {
@@ -114,7 +121,33 @@ func (p *poller) advanceDesign(ctx context.Context, item projectIssue) error {
 	return p.github.setDesignStatus(ctx, item, "Design Review")
 }
 
+func (p *poller) recoverDesignDeferral(ctx context.Context, item projectIssue, attempt int) error {
+	entries, err := os.ReadDir(p.cfg.DataDir)
+	if err != nil {
+		return err
+	}
+	prefix := fmt.Sprintf("design-%d-%d-", item.Number, attempt)
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), prefix) {
+			continue
+		}
+		dir := filepath.Join(p.cfg.DataDir, entry.Name())
+		if !codexAttemptLimited(dir) {
+			continue
+		}
+		err := p.deferCodexAttempt(ctx, "design", item.ID, attempt)
+		if err == nil || errors.Is(err, errCodexLimited) {
+			_ = os.RemoveAll(dir)
+		}
+		return err
+	}
+	return nil
+}
+
 func (p *poller) generateDesign(ctx context.Context, item projectIssue, attempt int) (runErr error) {
+	if err := p.requireCodex(ctx); err != nil {
+		return err
+	}
 	var issue designIssue
 	if err := p.github.getJSON(ctx, &issue, fmt.Sprintf("repos/%s/issues/%d", p.cfg.Repository, item.Number)); err != nil {
 		return err
@@ -134,11 +167,15 @@ func (p *poller) generateDesign(ctx context.Context, item projectIssue, attempt 
 	if err != nil {
 		return err
 	}
-	dir, err := os.MkdirTemp(p.cfg.DataDir, fmt.Sprintf("design-%d-", item.Number))
+	dir, err := os.MkdirTemp(p.cfg.DataDir, fmt.Sprintf("design-%d-%d-", item.Number, attempt))
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(dir)
+	defer func() {
+		if !codexAttemptLimited(dir) || errors.Is(runErr, errCodexLimited) {
+			_ = os.RemoveAll(dir)
+		}
+	}()
 	input := filepath.Join(dir, "input.txt")
 	output := filepath.Join(dir, "design.json")
 	if err := os.WriteFile(input, payload, 0600); err != nil {
@@ -162,8 +199,12 @@ func (p *poller) generateDesign(ctx context.Context, item projectIssue, attempt 
 	workflow := filepath.Join(p.cfg.WorkDir, ".conductor", "workflows", "design.yaml")
 	finishActivity := p.trackWorkflow(runCtx, workflowActivity{Issue: item.Number, Attempt: attempt, Phase: "design"}, log.Name())
 	defer func() { finishActivity(classifyRun(runCtx, runErr)) }()
-	if err := runInJob(runCtx, p.cfg.WorkDir, log, p.conductor.executable, "--silent", "run", workflow, "--no-interactive",
-		"--input", "adapter="+self, "--input", "input_path="+input, "--input", "output_path="+output); err != nil {
+	err = runInJob(runCtx, p.cfg.WorkDir, log, p.conductor.executable, "--silent", "run", workflow, "--no-interactive",
+		"--input", "adapter="+self, "--input", "input_path="+input, "--input", "output_path="+output)
+	if codexAttemptLimited(dir) {
+		return p.deferCodexAttempt(ctx, "design", item.ID, attempt)
+	}
+	if err != nil {
 		return err
 	}
 	data, err := os.ReadFile(output)

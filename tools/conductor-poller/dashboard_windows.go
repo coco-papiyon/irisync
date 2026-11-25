@@ -168,6 +168,7 @@ func (d dashboardSource) snapshot(w http.ResponseWriter, r *http.Request) {
 		Repository  string
 		Updated     time.Time
 		ViewingOnly bool
+		CodexUsage  codexUsageStatus
 		Issues      []dashboardIssue
 		PRs         []dashboardPR
 		Results     []dashboardResult
@@ -175,6 +176,9 @@ func (d dashboardSource) snapshot(w http.ResponseWriter, r *http.Request) {
 	}{
 		Repository: d.github.cfg.Repository, ViewingOnly: d.viewingOnly, Updated: time.Now(),
 		Errors: make(map[string]string),
+	}
+	if usage, err := (&state{db: d.db}).codexUsage(r.Context()); err == nil {
+		data.CodexUsage = usage
 	}
 	projectNumbers := make(map[string]int)
 	var retries map[string]implementationRetry
