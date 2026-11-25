@@ -1,13 +1,29 @@
+param([string] $ScratchDirectory)
+
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $root = (Get-Location).ProviderPath
-$cache = Join-Path ([IO.Path]::GetTempPath()) ('irisync-go-' + [guid]::NewGuid().ToString('N'))
-$null = New-Item -ItemType Directory -Path $cache
+$scratch = $ScratchDirectory
+$ownsScratch = !$scratch
+if ($ownsScratch) {
+    $scratch = Join-Path $root ('.conductor/.local/' + [guid]::NewGuid().ToString('N').Substring(0, 12))
+    $scratch = [IO.Path]::GetFullPath($scratch)
+    $null = New-Item -ItemType Directory -Path $scratch
+}
+$originalTemp = $env:TEMP
+$originalTmp = $env:TMP
 try {
-    $env:GOCACHE = $cache
+    $env:TEMP = $scratch
+    $env:TMP = $scratch
+    $env:GOCACHE = Join-Path $scratch 'go-cache'
     $env:GOPROXY = 'off'
     $env:GOTOOLCHAIN = 'local'
     $env:GOWORK = 'off'
+    # Tests create Git repositories under this worktree's temporary directory.
+    $gitConfigIndex = [int]$env:GIT_CONFIG_COUNT
+    Set-Item -LiteralPath "Env:GIT_CONFIG_KEY_$gitConfigIndex" -Value 'core.longpaths'
+    Set-Item -LiteralPath "Env:GIT_CONFIG_VALUE_$gitConfigIndex" -Value 'true'
+    $env:GIT_CONFIG_COUNT = [string]($gitConfigIndex + 1)
     foreach ($module in @('.', 'tools/conductor-poller')) {
         $path = Join-Path $root $module
         if (!(Test-Path -LiteralPath (Join-Path $path 'go.mod') -PathType Leaf)) { continue }
@@ -28,6 +44,10 @@ try {
         if ($LASTEXITCODE -ne 0) { exit 24 }
     }
 } finally {
-    $resolved = (Resolve-Path -LiteralPath $cache).ProviderPath
-    if ($resolved -ceq $cache) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+    $env:TEMP = $originalTemp
+    $env:TMP = $originalTmp
+    if ($ownsScratch) {
+        $resolved = (Resolve-Path -LiteralPath $scratch).ProviderPath
+        if ($resolved -ceq $scratch) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+    }
 }

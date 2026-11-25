@@ -12,12 +12,39 @@ import (
 	"strings"
 )
 
-const implementationPatchSchema = `{"type":"object","properties":{"patch":{"type":"string"}},"required":["patch"],"additionalProperties":false}`
+const implementationPatchSchema = `{"type":"object","properties":{"status":{"enum":["changed","already_satisfied","blocked"]},"reason":{"type":"string"},"patch":{"type":"string"}},"required":["status","reason","patch"],"additionalProperties":false}`
+
+const editBlockedPrefix = "edit: correction stopped: "
+
+type implementationEdit struct {
+	Status, Reason, Patch string
+}
+
+func (e implementationEdit) validate(hasFeedback bool) error {
+	reason := dashboardReviewText(e.Reason)
+	switch {
+	case e.Status == "changed" && strings.TrimSpace(e.Patch) != "":
+		return nil
+	case e.Status == "already_satisfied" && e.Patch == "" && reason != "" && !hasFeedback:
+		return nil
+	case e.Status == "blocked" && e.Patch == "" && reason != "":
+		return fmt.Errorf("correction stopped: %s", reason)
+	case strings.TrimSpace(e.Patch) == "" && hasFeedback:
+		return fmt.Errorf("correction stopped: no patch for the pending feedback. %s", reason)
+	default:
+		return fmt.Errorf("correction stopped: inconsistent edit response. %s", reason)
+	}
+}
+
+func implementationEditBlocked(dir string) bool {
+	return strings.HasPrefix(readFeedback(dir, "step-error.txt"), editBlockedPrefix)
+}
 
 type implementationManifest struct {
 	Worktree, Base, Branch, Design, Feedback, Validator string
 	ConductorExecutable                                 string
 	ResumeTree                                          string
+	PreviousReviewTree                                  string
 	IssueRequirements                                   string
 	ConflictPaths                                       []string
 }
@@ -99,9 +126,7 @@ func (m implementationManifest) checkWorktree() error {
 }
 
 func (m implementationManifest) edit(dir string) error {
-	payload, err := json.Marshal(map[string]string{
-		"approved_design": m.Design, "issue_requirements": m.IssueRequirements, "previous_feedback": m.Feedback,
-	})
+	payload, err := m.editPayload()
 	if err != nil {
 		return err
 	}
@@ -128,11 +153,39 @@ func (m implementationManifest) edit(dir string) error {
 	if err != nil {
 		return err
 	}
-	var proposed struct{ Patch string }
+	var proposed implementationEdit
 	if err := json.Unmarshal(data, &proposed); err != nil {
 		return err
 	}
+	if err := proposed.validate(strings.TrimSpace(m.Feedback) != ""); err != nil {
+		return err
+	}
 	return m.applyPatch(dir, proposed.Patch)
+}
+
+func (m implementationManifest) editPayload() ([]byte, error) {
+	// Include the staged candidate even when the read-only agent cannot run Git.
+	// Expanded context supplies the current text of changed files on ordinary retries.
+	diff, err := gitRawOutput(context.Background(), m.Worktree, "diff", "--cached", "--no-ext-diff",
+		"--no-textconv", "--no-color", "--unified=1000000", m.Base)
+	if err != nil {
+		return nil, fmt.Errorf("read staged candidate for editing: %w", err)
+	}
+	if len(diff) > 256<<10 {
+		diff, err = gitRawOutput(context.Background(), m.Worktree, "diff", "--cached", "--no-ext-diff",
+			"--no-textconv", "--no-color", m.Base)
+		if err != nil {
+			return nil, fmt.Errorf("read staged candidate for editing: %w", err)
+		}
+		if len(diff) > 256<<10 {
+			return nil, fmt.Errorf("correction stopped: staged source diff exceeds the edit input limit")
+		}
+	}
+	return json.Marshal(map[string]string{
+		"approved_design": m.Design, "issue_requirements": m.IssueRequirements,
+		"previous_feedback":     dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]"),
+		"staged_diff_from_base": dashboardSecrets.ReplaceAllString(string(diff), "[redacted]"),
+	})
 }
 
 func (m implementationManifest) applyPatch(dir, patch string) error {
@@ -209,9 +262,25 @@ func (m implementationManifest) validate(dir string) error {
 		return err
 	}
 	defer log.Close()
+	// Keep Git's temporary repositories close to the primary checkout root.
+	localDir := filepath.Join(filepath.Dir(filepath.Dir(m.Validator)), ".local")
+	localDir, err = filepath.EvalSymlinks(localDir)
+	if err != nil {
+		return fmt.Errorf("resolve validation temp root: %w", err)
+	}
+	scratch, err := os.MkdirTemp(localDir, "v-")
+	if err != nil {
+		return fmt.Errorf("create validation temp directory: %w", err)
+	}
+	defer os.RemoveAll(scratch)
+	writableRoots, err := json.Marshal([]string{scratch})
+	if err != nil {
+		return err
+	}
 	cmd := exec.Command("codex", "-c", `sandbox_mode="workspace-write"`,
+		"-c", "sandbox_workspace_write.writable_roots="+string(writableRoots),
 		"-c", `sandbox_workspace_write.network_access=false`, "sandbox", "--", pwsh,
-		"-NoProfile", "-NonInteractive", "-File", m.Validator)
+		"-NoProfile", "-NonInteractive", "-File", m.Validator, "-ScratchDirectory", scratch)
 	cmd.Dir = m.Worktree
 	cmd.Stdout, cmd.Stderr = log, log
 	isolateCommand(cmd, dir)
@@ -253,11 +322,20 @@ func (m implementationManifest) review(dir string) error {
 	if len(diff) > 256<<10 {
 		return fmt.Errorf("implementation diff exceeds the self-review input limit")
 	}
-	payload, err := json.Marshal(map[string]string{"issue_requirements": m.IssueRequirements, "approved_design": m.Design, "diff": string(diff)})
+	input := map[string]string{"issue_requirements": m.IssueRequirements, "approved_design": m.Design,
+		"diff": string(diff), "previous_feedback": dashboardSecrets.ReplaceAllString(m.Feedback, "[redacted]")}
+	if validCommitSHA(m.PreviousReviewTree) {
+		delta, err := gitRawOutput(context.Background(), m.Worktree, "diff", "--no-ext-diff",
+			"--no-textconv", "--no-color", m.PreviousReviewTree, string(tree))
+		if err == nil && len(delta) <= 64<<10 {
+			input["diff_since_previous_review"] = dashboardSecrets.ReplaceAllString(string(delta), "[redacted]")
+		}
+	}
+	payload, err := json.Marshal(input)
 	if err != nil {
 		return err
 	}
-	prompt := "実装後の自己レビューを行う。ステージ済みの差分はローカル検証を通過している。PR 公開前のため GitHub 上の CI 結果やレビュー記録は確認対象外とする。"
+	prompt := "実装後の自己レビューを行う。前回の指摘があれば先に解消を確認し、承認済み設計の同じ基準に沿って全体を判定する。ステージ済みの差分はローカル検証を通過している。PR 公開前のため GitHub 上の CI 結果やレビュー記録は確認対象外とする。"
 	verdict, err := codexReview(dir, prompt, payload)
 	if err != nil {
 		return err
@@ -360,6 +438,21 @@ func readFeedback(dir, name string) string {
 	}
 	data, _ := io.ReadAll(io.LimitReader(f, limit))
 	return strings.ToValidUTF8(string(data), "")
+}
+
+func previousValidationFailure(workRoot string, attempts int) string {
+	for n := attempts; n > 0; n-- {
+		dir := filepath.Join(workRoot, fmt.Sprintf("attempt-%d", n))
+		stageError := strings.TrimSpace(readFeedback(dir, "step-error.txt"))
+		if strings.HasPrefix(stageError, "validate:") {
+			output := strings.TrimSpace(readFeedback(dir, "validation.log"))
+			return strings.TrimSpace(stageError + "\n" + output)
+		}
+		if _, err := os.Stat(filepath.Join(dir, "validated-tree")); err == nil {
+			break
+		}
+	}
+	return ""
 }
 
 func readPreviousReview(dir string) string {
