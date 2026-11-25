@@ -4,6 +4,7 @@ import (
 	"path"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type rootPath struct {
@@ -90,14 +91,35 @@ func isWindowsDeviceName(name string) bool {
 }
 
 func (root rootPath) overlaps(other rootPath) bool {
-	if root.windows != other.windows || !strings.EqualFold(root.volume, other.volume) {
+	if root.windows != other.windows || !equalWindowsPathPart(root.volume, other.volume) {
 		return false
 	}
 	for i := 0; i < min(len(root.parts), len(other.parts)); i++ {
 		left, right := root.parts[i], other.parts[i]
-		if left != right && (!root.windows || !strings.EqualFold(left, right)) {
+		if left != right && (!root.windows || !equalWindowsPathPart(left, right)) {
 			return false
 		}
 	}
 	return true
+}
+
+// Windows path comparison uses ordinary case pairs in the BMP. Broader
+// Unicode folding can make distinct names such as K and K compare equal.
+func equalWindowsPathPart(left, right string) bool {
+	if left == right {
+		return true
+	}
+	for _, leftRune := range left {
+		if right == "" {
+			return false
+		}
+		rightRune, size := utf8.DecodeRuneInString(right)
+		right = right[size:]
+		if leftRune != rightRune && (leftRune > 0xffff || rightRune > 0xffff ||
+			unicode.ToUpper(leftRune) != unicode.ToUpper(rightRune) ||
+			unicode.ToLower(leftRune) != unicode.ToLower(rightRune)) {
+			return false
+		}
+	}
+	return right == ""
 }
