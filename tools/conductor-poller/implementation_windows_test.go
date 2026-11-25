@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,18 @@ func TestImplementationTreeRejectsEditsAfterValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	validated := git(tree, "write-tree")
+	m.Feedback = "Fix the candidate"
+	data, err := m.editPayload()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["previous_feedback"] != m.Feedback || !strings.Contains(payload["staged_diff_from_base"], "+# Candidate\n") {
+		t.Fatal("edit request omitted the previous code or review feedback")
+	}
 	diff, err := gitRawOutput(ctx, tree, "diff", "--cached")
 	if err != nil || !strings.HasSuffix(string(diff), "+# Candidate\n") {
 		t.Fatalf("review diff lost its final newline: %q, %v", diff, err)
@@ -80,5 +93,51 @@ func TestImplementationTreeRejectsEditsAfterValidation(t *testing.T) {
 	}
 	if got := git(repo, "rev-parse", "HEAD"); got != base {
 		t.Fatalf("primary checkout changed: %s", got)
+	}
+}
+
+func TestImplementationEditStopsWhenSourceIsUnavailable(t *testing.T) {
+	for _, response := range []string{
+		`{"patch":""}`,
+		`{"status":"blocked","reason":"Cannot read the current source","patch":""}`,
+		`{"status":"already_satisfied","reason":"No change needed","patch":""}`,
+	} {
+		var edit implementationEdit
+		if err := json.Unmarshal([]byte(response), &edit); err != nil {
+			t.Fatal(err)
+		}
+		err := edit.validate(true)
+		if err == nil || !strings.HasPrefix("edit: "+err.Error(), editBlockedPrefix) {
+			t.Fatalf("expected the edit to stop before validation and review: %s (%v)", response, err)
+		}
+		if edit.Status == "blocked" && !strings.Contains(err.Error(), edit.Reason) {
+			t.Fatalf("stop reason was lost: %v", err)
+		}
+	}
+}
+
+func TestPreviousValidationFailureSurvivesAnInterruptedEdit(t *testing.T) {
+	root := t.TempDir()
+	first := filepath.Join(root, "attempt-1")
+	second := filepath.Join(root, "attempt-2")
+	write := func(dir, name, contents string) {
+		t.Helper()
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(first, "step-error.txt", "validate: go test failed")
+	write(first, "validation.log", "--- FAIL: TestDashboardLog\nAccess is denied.\n")
+	write(second, "step-error.txt", "edit: correction stopped: validation details are missing")
+	feedback := previousValidationFailure(root, 2)
+	if !strings.Contains(feedback, "TestDashboardLog") || !strings.Contains(feedback, "Access is denied.") {
+		t.Fatalf("missing validation details: %q", feedback)
+	}
+	write(second, "validated-tree", strings.Repeat("a", 40))
+	if feedback := previousValidationFailure(root, 2); feedback != "" {
+		t.Fatalf("passed validation carried an older failure forward: %q", feedback)
 	}
 }

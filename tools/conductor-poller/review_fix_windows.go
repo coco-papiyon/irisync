@@ -49,6 +49,9 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		return err
 	}
 	previous := filepath.Join(workDir, fmt.Sprintf("attempt-%d", fix.attempts))
+	if implementationEditBlocked(previous) {
+		return p.github.setDesignStatus(ctx, item, "Blocked")
+	}
 	tree, err := os.ReadFile(filepath.Join(previous, "approved-tree"))
 	if err != nil || job.checkTree(string(tree)) != nil {
 		var total int
@@ -59,7 +62,8 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 		if total >= reviewFixLimit(kind) {
 			return p.github.setDesignStatus(ctx, item, "Blocked")
 		}
-		job.Feedback += "\n" + readFeedback(previous, "step-error.txt") + "\n" + readPreviousReview(previous)
+		job.Feedback += "\n" + readFeedback(previous, "step-error.txt") + "\n" + readPreviousReview(previous) +
+			"\n" + previousValidationFailure(workDir, fix.attempts)
 		job.IssueRequirements, err = p.github.reviewIssueRequirements(ctx, item)
 		if err != nil {
 			return err
@@ -76,7 +80,11 @@ func (p *poller) fixReview(ctx context.Context, item projectIssue, pr pullDetail
 			limit = min(limit, 15*time.Minute)
 		}
 		activity := workflowActivity{Issue: item.Number, PR: pr.Number, Attempt: fix.attempts + 1, Phase: "pr fix"}
-		if err := p.runReviewWorkflow(ctx, "implement.yaml", dir, limit, job, activity); err != nil {
+		err := p.runReviewWorkflow(ctx, "implement.yaml", dir, limit, job, activity)
+		if ctx.Err() == nil && implementationEditBlocked(dir) {
+			return p.github.setDesignStatus(ctx, item, "Blocked")
+		}
+		if err != nil {
 			return err
 		}
 		tree, err = os.ReadFile(filepath.Join(dir, "approved-tree"))

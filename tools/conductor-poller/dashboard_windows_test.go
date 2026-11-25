@@ -89,12 +89,12 @@ func TestImplementationRetryPreservesHistoryAndBudget(t *testing.T) {
 	defer closeState()
 	sha := strings.Repeat("a", 40)
 	if _, err := state.db.ExecContext(ctx, `INSERT INTO designs(issue_id,revision,approved_sha) VALUES ('issue',?1,?1);
-		INSERT INTO implementations(issue_id,design_sha,base_sha,attempts) VALUES ('issue',?1,?1,4)`, sha); err != nil {
+		INSERT INTO implementations(issue_id,design_sha,base_sha,attempts,attempt_limit) VALUES ('issue',?1,?1,2,2)`, sha); err != nil {
 		t.Fatal(err)
 	}
 	source := dashboardSource{db: state.db}
 	retries, err := source.implementationRetries(ctx)
-	if err != nil || retries["issue"] != (implementationRetry{Revision: sha, Attempts: 4}) {
+	if err != nil || retries["issue"] != (implementationRetry{Revision: sha, Attempts: 2}) {
 		t.Fatalf("unexpected retry candidates: %+v (%v)", retries, err)
 	}
 	for i := 0; i < 2; i++ {
@@ -104,7 +104,7 @@ func TestImplementationRetryPreservesHistoryAndBudget(t *testing.T) {
 	}
 	var attempts, limit int
 	if err := state.db.QueryRowContext(ctx, "SELECT attempts, attempt_limit FROM implementations WHERE issue_id='issue'").Scan(&attempts, &limit); err != nil ||
-		attempts != 4 || limit != 8 {
+		attempts != 2 || limit != 2+implementationAttempts {
 		t.Fatalf("retries overwrote history or granted twice: attempts=%d limit=%d (%v)", attempts, limit, err)
 	}
 	if _, err := state.db.ExecContext(ctx, "UPDATE designs SET approved_sha='' WHERE issue_id='issue'"); err != nil {

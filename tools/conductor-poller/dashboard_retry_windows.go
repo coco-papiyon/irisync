@@ -24,7 +24,7 @@ func (d dashboardSource) implementationRetries(ctx context.Context) (map[string]
 	rows, err := d.db.QueryContext(ctx, `
 		SELECT i.issue_id, i.design_sha, i.attempts
 		FROM implementations i JOIN designs d ON d.issue_id = i.issue_id AND d.approved_sha = i.design_sha AND d.revision = i.design_sha
-		WHERE i.attempts >= ?1 AND (i.attempt_limit <= i.attempts OR i.attempt_limit = i.attempts + ?1)
+		WHERE i.attempts > 0 AND (i.attempt_limit <= i.attempts OR i.attempt_limit = i.attempts + ?1)
 			AND i.pr_number = 0 AND i.commit_sha = ''
 			AND NOT EXISTS (SELECT 1 FROM manual_prs m WHERE m.issue_id = i.issue_id)
 			AND NOT EXISTS (SELECT 1 FROM implementations a WHERE a.issue_id = i.issue_id AND a.pr_number != 0)`, implementationAttempts)
@@ -47,7 +47,7 @@ func (d dashboardSource) implementationRetries(ctx context.Context) (map[string]
 func grantImplementationRetry(ctx context.Context, db *sql.DB, issueID string, retry implementationRetry) (bool, error) {
 	result, err := db.ExecContext(ctx, `
 		UPDATE implementations SET attempt_limit = attempts + ?1
-		WHERE issue_id = ?2 AND design_sha = ?3 AND attempts = ?4 AND attempts >= ?1
+		WHERE issue_id = ?2 AND design_sha = ?3 AND attempts = ?4 AND attempts > 0
 			AND (attempt_limit <= attempts OR attempt_limit = attempts + ?1)
 			AND pr_number = 0 AND commit_sha = ''
 			AND EXISTS (SELECT 1 FROM designs d WHERE d.issue_id = ?2 AND d.approved_sha = ?3 AND d.revision = ?3)
@@ -73,7 +73,7 @@ func (d dashboardSource) retryImplementation(w http.ResponseWriter, r *http.Requ
 		dashboardError(w, http.StatusForbidden, "実装の再開には通常起動の Poller が必要です。")
 		return
 	}
-	if request.Number < 1 || request.Attempts < implementationAttempts || !validCommitSHA(request.Revision) {
+	if request.Number < 1 || request.Attempts < 1 || !validCommitSHA(request.Revision) {
 		dashboardError(w, http.StatusBadRequest, "再開する実装の情報を確認してください。")
 		return
 	}
