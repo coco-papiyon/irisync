@@ -58,7 +58,7 @@ func TestConfigPrecedence(t *testing.T) {
 		pairFixture("alpha", localFixture("a"), "/data/shared", "{host: alias-a}", "    startup: start\n    exclude: ['*.tmp', '.git/**']\n") +
 		pairFixture("beta", localFixture("b"), "/data/shared", "{host: example.test, use_ssh_config: false, user: sync}", "    startup: stop\n    sync: {max_file_size: 500MiB}\n    conflict: {priority: remote}\n") +
 		pairFixture("gamma", localFixture("c"), "D:/shared", "{host: alias-b}", "    startup: restore\n    sync: {max_file_size: 0}\n") +
-		pairFixture("delta", localFixture("d"), "/data/other", "{host: alias-b}", "")
+		pairFixture("delta", localFixture("d"), "/data/other", "{host: alias-c}", "")
 	env := map[string]string{
 		"IRISYNC_HTTP_LISTEN":          "[::1]:8081",
 		"IRISYNC_MAX_FILE_SIZE":        "3GiB",
@@ -218,6 +218,28 @@ func TestForwardSlashRemoteRootsUseWindowsSyntaxForTheirDestination(t *testing.T
 				}
 			} else if err != nil || len(cfg.Pairs) != 3 {
 				t.Fatalf("want distinct POSIX roots, got cfg = %v, error = %v", cfg, err)
+			}
+		})
+	}
+}
+
+func TestWindowsDestinationRequiresFullyQualifiedRoots(t *testing.T) {
+	for _, windowsRoot := range []string{"C:/fixture-sync", "\\\\server\\share\\fixture-sync"} {
+		t.Run(windowsRoot, func(t *testing.T) {
+			windowsPair := pairFixture("first", localFixture("a"), windowsRoot, "{host: same-host}", "")
+			driveRelativePair := pairFixture("second", localFixture("b"), "/fixture-sync/child", "{host: SAME-HOST}", "")
+			for _, tc := range []struct {
+				pairs string
+				index int
+			}{
+				{windowsPair + driveRelativePair, 1},
+				{driveRelativePair + windowsPair, 0},
+			} {
+				cfg, err := decodeFixture(t, "pairs:\n"+tc.pairs, nil)
+				want := fmt.Sprintf("pairs[%d].remote.path: expected an absolute Windows path with a drive or UNC share", tc.index)
+				if cfg != nil || err == nil || !strings.Contains(err.Error(), want) {
+					t.Fatalf("want %q, got cfg = %v, error = %v", want, cfg, err)
+				}
 			}
 		})
 	}

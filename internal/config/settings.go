@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"runtime"
-	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -161,7 +160,7 @@ type pairRoots struct {
 func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
 	pairs := make([]Pair, 0, len(sequence.Content))
 	ids := make(map[string]int, len(sequence.Content))
-	// Collect Windows paths for every destination before classifying // roots.
+	// Determine each destination's path rules before validating any roots.
 	windowsDestinations := make(map[sshDestination]bool)
 	for i, node := range sequence.Content {
 		field := fmt.Sprintf("pairs[%d]", i)
@@ -193,11 +192,13 @@ func validatePairRoots(pairs []Pair, windowsDestinations map[sshDestination]bool
 			return invalid(field+".local.path", "expected a valid absolute path for the controller OS")
 		}
 		destination := pair.SSH.destination()
-		windows := hasWindowsRootSyntax(pair.RemotePath) ||
-			strings.HasPrefix(pair.RemotePath, "//") && windowsDestinations[destination]
+		windows := windowsDestinations[destination]
 		remote, ok := parseRoot(pair.RemotePath, windows)
 		if !ok {
-			return invalid(field+".remote.path", "expected a valid absolute POSIX or Windows path")
+			if windows {
+				return invalid(field+".remote.path", "expected an absolute Windows path with a drive or UNC share")
+			}
+			return invalid(field+".remote.path", "expected a valid absolute POSIX path")
 		}
 		for j, previous := range roots {
 			if local.overlaps(previous.local) {
