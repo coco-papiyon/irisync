@@ -12,8 +12,32 @@ type rootPath struct {
 	parts   []string
 }
 
-func isWindowsRoot(value string) bool {
-	return hasDrive(value) || strings.HasPrefix(value, "\\\\")
+func parseRemoteRoots(value string) []rootPath {
+	windows := hasDrive(value) || strings.HasPrefix(value, "\\\\")
+	root, ok := parseRoot(value, windows)
+	if !ok {
+		return nil
+	}
+	roots := []rootPath{root}
+	// A leading // can be a POSIX path or a Windows UNC path. Check both
+	// interpretations without losing POSIX overlaps such as /data and //data.
+	if strings.HasPrefix(value, "//") {
+		if unc, ok := parseRoot(value, true); ok {
+			roots = append(roots, unc)
+		}
+	}
+	return roots
+}
+
+func remoteRootsOverlap(roots, others []rootPath) bool {
+	for _, root := range roots {
+		for _, other := range others {
+			if root.overlaps(other) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasDrive(value string) bool {

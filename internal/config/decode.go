@@ -44,7 +44,7 @@ func decodeMapping(node *yaml.Node, field string, ignoreUnknown bool, known fiel
 	for i := 0; i < len(node.Content); i += 2 {
 		key := dereference(node.Content[i])
 		decode, found := known[key.Value]
-		if !found || key.Kind != yaml.ScalarNode || key.ShortTag() != "!!str" {
+		if !found {
 			if key.Kind == yaml.ScalarNode && key.ShortTag() == "!!merge" {
 				return fmt.Errorf("invalid configuration: %s: YAML merge key at line %d is unsupported", name, node.Content[i].Line)
 			}
@@ -56,6 +56,9 @@ func decodeMapping(node *yaml.Node, field string, ignoreUnknown bool, known fiel
 		child := key.Value
 		if field != "" {
 			child = field + "." + child
+		}
+		if err := requireType(key, yaml.ScalarNode, "!!str", child, "expected a string key"); err != nil {
+			return err
 		}
 		if err := decode(dereference(node.Content[i+1]), child); err != nil {
 			return err
@@ -109,9 +112,12 @@ func httpListenValue(node *yaml.Node, field string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, port, err := net.SplitHostPort(value)
-	if err != nil || strings.ContainsAny(value, " \t\r\n") {
+	host, port, err := net.SplitHostPort(value)
+	if err != nil {
 		return "", invalid(field, "expected a host and port")
+	}
+	if host != "" && !validNetworkHost(host) {
+		return "", invalid(field, "expected a valid host name or IP address")
 	}
 	number, err := strconv.ParseUint(port, 10, 16)
 	if err != nil || number == 0 {

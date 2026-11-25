@@ -153,8 +153,9 @@ func (cfg *Config) applyEnv(lookup func(string) (string, bool)) error {
 }
 
 type pairRoots struct {
-	local, remote rootPath
-	destination   sshDestination
+	local       rootPath
+	remote      []rootPath
+	destination sshDestination
 }
 
 func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
@@ -175,8 +176,8 @@ func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
 		if !ok {
 			return nil, invalid(field+".local.path", "expected an absolute path for the controller OS")
 		}
-		remote, ok := parseRoot(pair.RemotePath, isWindowsRoot(pair.RemotePath))
-		if !ok {
+		remote := parseRemoteRoots(pair.RemotePath)
+		if len(remote) == 0 {
 			return nil, invalid(field+".remote.path", "expected an absolute POSIX or Windows path")
 		}
 		destination := pair.SSH.destination()
@@ -184,7 +185,7 @@ func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
 			if local.overlaps(previous.local) {
 				return nil, fmt.Errorf("invalid configuration: %s.local.path overlaps pairs[%d].local.path", field, j)
 			}
-			if destination == previous.destination && remote.overlaps(previous.remote) {
+			if destination == previous.destination && remoteRootsOverlap(remote, previous.remote) {
 				return nil, fmt.Errorf("invalid configuration: %s.remote.path overlaps pairs[%d].remote.path", field, j)
 			}
 		}

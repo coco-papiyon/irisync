@@ -48,6 +48,7 @@ func TestCLI(t *testing.T) {
 		{"configuration", "pairs: []\n", ""},
 		{"valid pair", pairConfig + "    startup: start\n", ""},
 		{"invalid pair startup", pairConfig + "    startup: fixture-value\n", "pairs[0].startup"},
+		{"invalid known configuration key type", "!!int pairs: [null]\n", "pairs: expected a string key"},
 		{"empty mapping", "{}\n", ""},
 		{"empty document", "", "expected one mapping"},
 		{"syntax error", "fixture-value: [\n", "syntax error"},

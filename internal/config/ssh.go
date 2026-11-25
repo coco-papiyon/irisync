@@ -53,24 +53,46 @@ func sshValue(node *yaml.Node, field string) (SSH, error) {
 }
 
 func validSSHHost(host string, useSSHConfig bool) bool {
-	if !useSSHConfig {
-		if _, err := netip.ParseAddr(host); err == nil {
-			// The parser also accepts IPv6 scope names. Check these like host names.
-			_, zone, scoped := strings.Cut(host, "%")
-			return !scoped || validHostName(zone)
-		}
+	if useSSHConfig {
+		return validSSHAlias(host)
 	}
-	return validHostName(host)
+	return validNetworkHost(host)
 }
 
-func validHostName(host string) bool {
+func validSSHAlias(host string) bool {
 	if host == "" || strings.HasPrefix(host, "-") || strings.Trim(host, ".") == "" {
 		return false
 	}
 	return !strings.ContainsFunc(host, func(r rune) bool {
-		return !('a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' ||
-			r == '.' || r == '-' || r == '_')
+		return !isASCIIAlphanumeric(r) && r != '.' && r != '-' && r != '_'
 	})
+}
+
+func validNetworkHost(host string) bool {
+	if addr, err := netip.ParseAddr(host); err == nil {
+		zone := addr.Zone()
+		return zone == "" || validSSHAlias(zone)
+	}
+	host = strings.TrimSuffix(host, ".")
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(host, ".") {
+		if len(label) == 0 || len(label) > 63 || !isASCIIAlphanumeric(rune(label[0])) ||
+			!isASCIIAlphanumeric(rune(label[len(label)-1])) {
+			return false
+		}
+		if strings.ContainsFunc(label, func(r rune) bool {
+			return !isASCIIAlphanumeric(r) && r != '-'
+		}) {
+			return false
+		}
+	}
+	return true
+}
+
+func isASCIIAlphanumeric(r rune) bool {
+	return 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9'
 }
 
 type sshDestination struct {
