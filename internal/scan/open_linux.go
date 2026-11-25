@@ -4,10 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"golang.org/x/sys/unix"
 )
+
+func absoluteRoot(root string) (string, error) {
+	return filepath.Abs(root)
+}
 
 func openRoot(absolute string) (*os.File, error) {
 	fd, err := unix.Openat2(unix.AT_FDCWD, absolute, &unix.OpenHow{

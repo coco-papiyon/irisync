@@ -59,6 +59,16 @@ func TestLinuxRootPathIsCheckedBeforeCleaning(t *testing.T) {
 	}
 }
 
+func TestLinuxRootAllowsNativeNameWithTrailingPeriod(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "safe./marker", "valid POSIX root")
+	got, err := Scan(context.Background(), filepath.Join(root, "safe."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOnlyFile(t, got, "marker")
+}
+
 func TestLinuxCaseComparisonPreservesDistinctNames(t *testing.T) {
 	names := []string{"Ǆ", "ǅ", "ა", "Ა", "\U00010400", "\U00010428", "\xff", "\ufffd"}
 	collisions, err := collidingNames(names)

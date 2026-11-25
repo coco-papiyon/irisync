@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,13 +96,59 @@ func TestMetadataChangeInvalidatesSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer file.Close()
-	before, err := file.Stat()
+	before, err := captureSnapshot(file)
 	if err != nil {
 		t.Fatal(err)
 	}
 	writeFile(t, root, "entry", "changed size")
 	if err := unchanged(file, before, opener); err == nil {
 		t.Fatal("changed file passed its metadata check")
+	}
+}
+
+func TestSameSizeUpdateWithPreservedModTimeInvalidatesSnapshot(t *testing.T) {
+	root := t.TempDir()
+	filename := filepath.Join(root, "entry")
+	writeFile(t, root, "entry", "old")
+	stamp := time.Unix(1_700_000_000, 123_456_700)
+	if err := os.Chtimes(filename, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	directory, err := openRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer directory.Close()
+	opener := func() (*os.File, error) { return openEntry(directory, "entry") }
+	file, err := opener()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	before, err := captureSnapshot(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content, err := io.ReadAll(file); err != nil || string(content) != "old" {
+		t.Fatalf("initial read: %q, error %v", content, err)
+	}
+	// Leave enough room for filesystems whose timestamp clock ticks in
+	// milliseconds to distinguish the two metadata states.
+	time.Sleep(20 * time.Millisecond)
+	writeFile(t, root, "entry", "new")
+	if err := os.Chtimes(filename, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before.FileInfo, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("the fixture must preserve identity, size and modification time")
+	}
+	if err := unchanged(file, before, opener); !errors.Is(err, errEntryChanged) {
+		t.Fatalf("want a changed entry, got %v", err)
 	}
 }
 

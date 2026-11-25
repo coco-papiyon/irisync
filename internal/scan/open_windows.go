@@ -12,18 +12,44 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func absoluteRoot(root string) (string, error) {
+	volume := filepath.VolumeName(root)
+	if volume != "" {
+		if err := validateWindowsVolume(filepath.FromSlash(volume)); err != nil {
+			return "", err
+		}
+	}
+	// GetFullPathName can strip a trailing dot or space from an invalid name.
+	for _, name := range strings.Split(filepath.ToSlash(root[len(volume):]), "/") {
+		if name == "" || name == "." {
+			continue
+		}
+		if err := ValidateRelativePath(name); err != nil {
+			return "", errors.New("invalid Windows root path component")
+		}
+	}
+	return filepath.Abs(root)
+}
+
+func validateWindowsVolume(volume string) error {
+	if strings.HasPrefix(volume, "\\\\") {
+		server, share, ok := strings.Cut(volume[2:], "\\")
+		if !ok || !pathname.ValidWindowsName(server) || !pathname.ValidWindowsName(share) {
+			return errors.New("expected a standard UNC share")
+		}
+	} else if len(volume) != 2 || volume[1] != ':' {
+		return errors.New("expected a standard Windows drive")
+	}
+	return nil
+}
+
 func openRoot(absolute string) (*os.File, error) {
 	volume := filepath.VolumeName(absolute)
 	if volume == "" || !filepath.IsAbs(absolute) {
 		return nil, errors.New("expected an absolute drive or UNC path")
 	}
-	if strings.HasPrefix(volume, "\\\\") {
-		server, share, ok := strings.Cut(volume[2:], "\\")
-		if !ok || !pathname.ValidWindowsName(server) || !pathname.ValidWindowsName(share) {
-			return nil, errors.New("expected a standard UNC share")
-		}
-	} else if len(volume) != 2 || volume[1] != ':' {
-		return nil, errors.New("expected a standard Windows drive")
+	if err := validateWindowsVolume(volume); err != nil {
+		return nil, err
 	}
 
 	// Open only the volume root by an absolute name. From there, the same

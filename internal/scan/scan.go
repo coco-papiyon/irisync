@@ -73,7 +73,7 @@ func Scan(ctx context.Context, rootPath string) (Result, error) {
 			return Result{}, errors.New("scan root must not contain a parent path component")
 		}
 	}
-	absolute, err := filepath.Abs(rootPath)
+	absolute, err := absoluteRoot(rootPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve scan root: %w", err)
 	}
@@ -96,7 +96,7 @@ func (s *scanner) record(relative string, kind IssueKind, err error) {
 }
 
 func (s *scanner) walk(directory *os.File, relative string, openCurrent func() (*os.File, error)) error {
-	before, err := directory.Stat()
+	before, err := captureSnapshot(directory)
 	if err != nil {
 		return err
 	}
@@ -159,7 +159,7 @@ func (s *scanner) visit(relative string) error {
 		return nil
 	}
 	defer file.Close()
-	before, err := file.Stat()
+	before, err := captureSnapshot(file)
 	if err != nil {
 		s.record(relative, Unreadable, err)
 		return nil
@@ -203,8 +203,27 @@ func (s *scanner) visit(relative string) error {
 	return nil
 }
 
-func unchanged(file *os.File, before fs.FileInfo, openCurrent func() (*os.File, error)) error {
-	after, err := file.Stat()
+type entrySnapshot struct {
+	fs.FileInfo
+	changeStamp [2]int64
+}
+
+var errEntryChanged = errors.New("entry changed during scan")
+
+func captureSnapshot(file *os.File) (entrySnapshot, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return entrySnapshot{}, err
+	}
+	stamp, err := entryChangeStamp(file, info)
+	if err != nil {
+		return entrySnapshot{}, err
+	}
+	return entrySnapshot{FileInfo: info, changeStamp: stamp}, nil
+}
+
+func unchanged(file *os.File, before entrySnapshot, openCurrent func() (*os.File, error)) error {
+	after, err := captureSnapshot(file)
 	if err != nil {
 		return err
 	}
@@ -213,19 +232,20 @@ func unchanged(file *os.File, before fs.FileInfo, openCurrent func() (*os.File, 
 		return err
 	}
 	defer current.Close()
-	named, err := current.Stat()
+	named, err := captureSnapshot(current)
 	if err != nil {
 		return err
 	}
 	if !sameSnapshot(before, after) || !sameSnapshot(before, named) {
-		return errors.New("entry changed during scan")
+		return errEntryChanged
 	}
 	return nil
 }
 
-func sameSnapshot(before, after fs.FileInfo) bool {
-	return os.SameFile(before, after) && before.Mode() == after.Mode() &&
-		before.Size() == after.Size() && before.ModTime().Equal(after.ModTime())
+func sameSnapshot(before, after entrySnapshot) bool {
+	return os.SameFile(before.FileInfo, after.FileInfo) && before.Mode() == after.Mode() &&
+		before.Size() == after.Size() && before.ModTime().Equal(after.ModTime()) &&
+		before.changeStamp == after.changeStamp
 }
 
 type contextReader struct {

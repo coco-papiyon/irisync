@@ -18,6 +18,25 @@ func TestWindowsRejectsDriveRelativeRoot(t *testing.T) {
 	}
 }
 
+func TestWindowsRootSpellingIsCheckedBeforeFullPath(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "safe/marker", "valid root")
+	for _, tail := range []string{"/safe.", "/safe. ", "/safe ", "/safe/.. "} {
+		got, err := Scan(context.Background(), root+tail)
+		if err == nil || len(got.Files) != 0 {
+			t.Errorf("normalized invalid root %q: got %+v, error %v", tail, got, err)
+		}
+	}
+	got, err := Scan(context.Background(), root+"/safe/.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireOnlyFile(t, got, "marker")
+	if _, err := absoluteRoot("\\\\server\\share. \\path"); err == nil {
+		t.Fatal("accepted a UNC share with a trailing space")
+	}
+}
+
 func TestWindowsJunctions(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	writeFile(t, root, "safe", "inside")
