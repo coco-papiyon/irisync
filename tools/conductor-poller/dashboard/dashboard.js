@@ -10,12 +10,13 @@ const labels = {
   smoke: "スモークテスト", design: "設計", implementation: "実装", review: "レビュー",
   "implementation attempt": "実装の試行", "pr fix": "PR 修正", "merge check": "マージ状況の確認",
   running: "実行中", succeeded: "成功", failed: "失敗", interrupted: "中断", timed_out: "タイムアウト",
+  codex_limited: "Codex 利用制限",
   approved: "承認済み", validated: "ローカル検証済み", published: "PR 作成済み",
   "awaiting approval": "設計承認待ち", "changes requested": "修正が必要", recorded: "試行を記録済み"
 };
 const good = new Set(["Done", "SUCCESS", "MERGED", "APPROVED", "succeeded", "approved", "published", "validated"]);
 const bad = new Set(["Blocked", "FAILURE", "ERROR", "CHANGES_REQUESTED", "failed", "timed_out", "changes requested"]);
-const wait = new Set(["Pending", "Design Review", "PR Review", "REVIEW_REQUIRED", "EXPECTED", "awaiting approval"]);
+const wait = new Set(["Pending", "Design Review", "PR Review", "REVIEW_REQUIRED", "EXPECTED", "awaiting approval", "codex_limited"]);
 const active = new Set(["Ready", "Designing", "Implementing", "PR Fixing", "Merge Ready", "OPEN", "PENDING", "running"]);
 let snapshot;
 let resultsByIssue = new Map();
@@ -453,11 +454,45 @@ async function openLog(path) {
   }
 }
 
+function renderCodexUsage(usage, viewingOnly) {
+  const updated = usage.CheckedAt ? "最終取得 " + timeText(usage.CheckedAt * 1000) : "";
+  byId("codex-usage-checked").textContent = updated;
+  const windows = byId("codex-usage-windows");
+  const details = [];
+  for (const [window, fallback] of [[usage.Limits.Primary, "短期"], [usage.Limits.Secondary, "長期"]]) {
+    if (window?.UsedPercent == null) continue;
+    const minutes = window.WindowDurationMins;
+    const label = minutes === 10080 ? "週間" : minutes >= 60 && minutes % 60 === 0 ?
+      minutes / 60 + "時間" : minutes > 0 ? minutes + "分" : fallback;
+    const chart = node("div", undefined, "codex-window");
+    const meter = node("meter");
+    meter.min = 0;
+    meter.max = 100;
+    meter.value = Math.min(100, Math.max(0, window.UsedPercent));
+    meter.setAttribute("aria-label", label + "の利用率");
+    chart.append(node("strong", label + " " + window.UsedPercent + "% 使用"), meter);
+    if (window.ResetsAt > 0) {
+      chart.append(node("span", "リセット予定 " + timeText(window.ResetsAt * 1000), "empty"));
+    }
+    details.push(chart);
+  }
+  windows.replaceChildren(...details);
+  windows.hidden = details.length === 0;
+  let status = usage.Paused ? "利用制限中です。通常起動中の Poller は解除を確認してから自動で再実行します。" : "";
+  if (usage.RefreshFailed) {
+    status += (status ? " " : "") + "利用状況の取得に失敗しました。再取得を待っています。";
+  } else if (!usage.CheckedAt && !status) {
+    status = viewingOnly ? "通常起動中の Poller が取得した利用状況を表示します。" : "利用状況を取得しています。";
+  }
+  message("codex-usage-status", status);
+}
+
 function renderDashboard(data) {
   snapshot = data;
   resultsByIssue = groupIssueResults(data);
   byId("repository").textContent = data.Repository;
   byId("last-updated").textContent = "更新 " + timeText(data.Updated) + (data.ViewingOnly ? " ・ダッシュボードのみ起動中" : "");
+  renderCodexUsage(data.CodexUsage, data.ViewingOnly);
   message("issues-message", [data.Errors.issues, data.Errors.results, data.Errors.logs].filter(Boolean).join(" "));
   message("prs-message", data.Errors.prs);
   const issues = data.Issues || [];

@@ -57,6 +57,8 @@ func runDesignAdapter(inputPath, outputPath string) error {
 		cmd.Env = append(cmd.Env, env)
 	}
 	cmd.Env = append(cmd.Env, "GH_CONFIG_DIR="+filepath.Join(dir, "github"))
+	var stderr codexErrorStream
+	cmd.Stderr = &stderr
 	events, err := cmd.StdoutPipe()
 	if err != nil {
 		return err
@@ -65,9 +67,11 @@ func runDesignAdapter(inputPath, outputPath string) error {
 		return err
 	}
 	var usage *designUsage
+	var limited bool
 	scanner := bufio.NewScanner(events)
 	scanner.Buffer(make([]byte, 4096), 2<<20)
 	for scanner.Scan() {
+		limited = limited || codexEventLimited(scanner.Bytes())
 		var event struct {
 			Type  string
 			Usage *designUsage
@@ -82,7 +86,7 @@ func runDesignAdapter(inputPath, outputPath string) error {
 		return fmt.Errorf("read Codex events: %w", err)
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("codex exec: %w", err)
+		return codexExecError(dir, "codex exec", limited || stderr.reached(), err)
 	}
 	raw, err := os.ReadFile(rawPath)
 	if err != nil {

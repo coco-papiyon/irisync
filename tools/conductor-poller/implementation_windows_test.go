@@ -65,16 +65,28 @@ func TestImplementationTreeRejectsEditsAfterValidation(t *testing.T) {
 	}
 	validated := git(tree, "write-tree")
 	m.Feedback = "Fix the candidate"
+	m.VerifiedPrerequisites = &verifiedPrerequisites{
+		ProjectNumber: 4,
+		BlockedBy:     []verifiedPrerequisite{{Repository: "owner/example", Number: 30, Status: "Done"}},
+	}
 	data, err := m.editPayload()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var payload map[string]string
+	var payload struct {
+		Feedback      string                 `json:"previous_feedback"`
+		StagedDiff    string                 `json:"staged_diff_from_base"`
+		Prerequisites *verifiedPrerequisites `json:"verified_prerequisites"`
+	}
 	if err := json.Unmarshal(data, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["previous_feedback"] != m.Feedback || !strings.Contains(payload["staged_diff_from_base"], "+# Candidate\n") {
+	if payload.Feedback != m.Feedback || !strings.Contains(payload.StagedDiff, "+# Candidate\n") {
 		t.Fatal("edit request omitted the previous code or review feedback")
+	}
+	if payload.Prerequisites == nil || payload.Prerequisites.ProjectNumber != 4 ||
+		len(payload.Prerequisites.BlockedBy) != 1 || payload.Prerequisites.BlockedBy[0] != m.VerifiedPrerequisites.BlockedBy[0] {
+		t.Fatal("edit request omitted the verified prerequisite")
 	}
 	diff, err := gitRawOutput(ctx, tree, "diff", "--cached")
 	if err != nil || !strings.HasSuffix(string(diff), "+# Candidate\n") {

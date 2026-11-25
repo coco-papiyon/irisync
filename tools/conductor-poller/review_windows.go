@@ -157,6 +157,9 @@ func (p *poller) reviewAndPublish(ctx context.Context, item *projectIssue, pr pu
 
 func (p *poller) independentReview(ctx context.Context, item projectIssue, pr pullDetails, design string) (reviewVerdict, error) {
 	var verdict reviewVerdict
+	if err := p.requireCodex(ctx); err != nil {
+		return verdict, err
+	}
 	if err := p.fetchReviewCommit(ctx, pr.Head.SHA); err != nil {
 		return verdict, err
 	}
@@ -186,6 +189,9 @@ func (p *poller) independentReview(ctx context.Context, item projectIssue, pr pu
 		"diff": string(diff), "ci_checks": reviewCIEvidence(checks)}
 	activity := workflowActivity{Issue: item.Number, PR: pr.Number, Phase: "review"}
 	if err := p.runReviewWorkflow(ctx, "pr-review.yaml", dir, p.cfg.ImplementationTimeout, input, activity); err != nil {
+		if errors.Is(err, errCodexLimited) {
+			return verdict, p.deferCodexAttempt(ctx, "review", "", 0)
+		}
 		return verdict, err
 	}
 	if _, err := os.Stat(filepath.Join(dir, "review-complete")); err != nil {
@@ -278,7 +284,7 @@ func (p *poller) reviewDirectory(number int, step string) (string, error) {
 
 func (p *poller) runReviewWorkflow(ctx context.Context, workflow, dir string, limit time.Duration, input any, activity workflowActivity) error {
 	// Remove receipts from an interrupted earlier invocation before starting.
-	for _, name := range []string{"review-complete", "merge-result.txt", "approved-tree", "validated-tree"} {
+	for _, name := range []string{"review-complete", "merge-result.txt", "approved-tree", "validated-tree", codexLimitMarker} {
 		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -306,6 +312,9 @@ func (p *poller) runReviewWorkflow(ctx context.Context, workflow, dir string, li
 	err = runInJob(ctx, p.cfg.WorkDir, log, p.conductor.executable, "--silent", "run",
 		filepath.Join(p.cfg.WorkDir, ".conductor", "workflows", workflow), "--no-interactive",
 		"--input", "adapter="+self, "--input", "manifest="+manifest)
+	if codexAttemptLimited(dir) {
+		err = errCodexLimited
+	}
 	finishActivity(classifyRun(ctx, err))
 	return err
 }
