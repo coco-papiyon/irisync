@@ -4,7 +4,6 @@ import (
 	"path"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 type rootPath struct {
@@ -103,23 +102,23 @@ func (root rootPath) overlaps(other rootPath) bool {
 	return true
 }
 
-// Windows path comparison uses ordinary case pairs in the BMP. Broader
-// Unicode folding can make distinct names such as K and K compare equal.
+// Static Windows path comparison folds ASCII letters only. Non-ASCII bytes
+// must match exactly. Filesystem-specific equivalences are checked at startup.
 func equalWindowsPathPart(left, right string) bool {
-	if left == right {
-		return true
+	if len(left) != len(right) {
+		return false
 	}
-	for _, leftRune := range left {
-		if right == "" {
-			return false
-		}
-		rightRune, size := utf8.DecodeRuneInString(right)
-		right = right[size:]
-		if leftRune != rightRune && (leftRune > 0xffff || rightRune > 0xffff ||
-			unicode.ToUpper(leftRune) != unicode.ToUpper(rightRune) ||
-			unicode.ToLower(leftRune) != unicode.ToLower(rightRune)) {
+	for i := 0; i < len(left); i++ {
+		if lowerASCII(left[i]) != lowerASCII(right[i]) {
 			return false
 		}
 	}
-	return right == ""
+	return true
+}
+
+func lowerASCII(letter byte) byte {
+	if 'A' <= letter && letter <= 'Z' {
+		return letter + ('a' - 'A')
+	}
+	return letter
 }
