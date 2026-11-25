@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -153,15 +154,15 @@ func (cfg *Config) applyEnv(lookup func(string) (string, bool)) error {
 }
 
 type pairRoots struct {
-	local       rootPath
-	remote      []rootPath
-	destination sshDestination
+	local, remote rootPath
+	destination   sshDestination
 }
 
 func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
 	pairs := make([]Pair, 0, len(sequence.Content))
-	roots := make([]pairRoots, 0, len(sequence.Content))
 	ids := make(map[string]int, len(sequence.Content))
+	// Collect Windows paths for every destination before classifying // roots.
+	windowsDestinations := make(map[sshDestination]bool)
 	for i, node := range sequence.Content {
 		field := fmt.Sprintf("pairs[%d]", i)
 		pair, err := decodePair(dereference(node), field, maxFileSize)
@@ -171,30 +172,44 @@ func decodePairs(sequence *yaml.Node, maxFileSize int64) ([]Pair, error) {
 		if previous, found := ids[pair.ID]; found {
 			return nil, fmt.Errorf("invalid configuration: %s.id duplicates pairs[%d].id", field, previous)
 		}
-
-		local, ok := parseRoot(pair.LocalPath, runtime.GOOS == "windows")
-		if !ok {
-			return nil, invalid(field+".local.path", "expected an absolute path for the controller OS")
+		if hasWindowsRootSyntax(pair.RemotePath) {
+			windowsDestinations[pair.SSH.destination()] = true
 		}
-		remote := parseRemoteRoots(pair.RemotePath)
-		if len(remote) == 0 {
-			return nil, invalid(field+".remote.path", "expected an absolute POSIX or Windows path")
-		}
-		destination := pair.SSH.destination()
-		for j, previous := range roots {
-			if local.overlaps(previous.local) {
-				return nil, fmt.Errorf("invalid configuration: %s.local.path overlaps pairs[%d].local.path", field, j)
-			}
-			if destination == previous.destination && remoteRootsOverlap(remote, previous.remote) {
-				return nil, fmt.Errorf("invalid configuration: %s.remote.path overlaps pairs[%d].remote.path", field, j)
-			}
-		}
-
 		ids[pair.ID] = i
-		roots = append(roots, pairRoots{local: local, remote: remote, destination: destination})
 		pairs = append(pairs, pair)
 	}
+	if err := validatePairRoots(pairs, windowsDestinations); err != nil {
+		return nil, err
+	}
 	return pairs, nil
+}
+
+func validatePairRoots(pairs []Pair, windowsDestinations map[sshDestination]bool) error {
+	roots := make([]pairRoots, 0, len(pairs))
+	for i, pair := range pairs {
+		field := fmt.Sprintf("pairs[%d]", i)
+		local, ok := parseRoot(pair.LocalPath, runtime.GOOS == "windows")
+		if !ok {
+			return invalid(field+".local.path", "expected a valid absolute path for the controller OS")
+		}
+		destination := pair.SSH.destination()
+		windows := hasWindowsRootSyntax(pair.RemotePath) ||
+			strings.HasPrefix(pair.RemotePath, "//") && windowsDestinations[destination]
+		remote, ok := parseRoot(pair.RemotePath, windows)
+		if !ok {
+			return invalid(field+".remote.path", "expected a valid absolute POSIX or Windows path")
+		}
+		for j, previous := range roots {
+			if local.overlaps(previous.local) {
+				return fmt.Errorf("invalid configuration: %s.local.path overlaps pairs[%d].local.path", field, j)
+			}
+			if destination == previous.destination && remote.overlaps(previous.remote) {
+				return fmt.Errorf("invalid configuration: %s.remote.path overlaps pairs[%d].remote.path", field, j)
+			}
+		}
+		roots = append(roots, pairRoots{local: local, remote: remote, destination: destination})
+	}
+	return nil
 }
 
 func decodePair(node *yaml.Node, field string, maxFileSize int64) (Pair, error) {

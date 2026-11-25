@@ -168,6 +168,7 @@ func TestPairRootOverlaps(t *testing.T) {
 		{"same POSIX root", "a", "b", "/data/a", "/data/a", sameHost, sameHost, "remote.path"},
 		{"nested POSIX root", "a", "b", "/data/a", "/data//a/./b", sameHost, "{host: ALIAS-A}", "remote.path"},
 		{"POSIX double leading slash", "a", "b", "/data/a", "//data/a/b", sameHost, sameHost, "remote.path"},
+		{"POSIX double leading slash with case difference", "a", "b", "//srv/Data", "//srv/data", sameHost, sameHost, ""},
 		{"POSIX case", "a", "b", "/data/A", "/data/a", sameHost, sameHost, ""},
 		{"different destinations", "a", "b", "/data/a", "/data/a", sameHost, otherHost, ""},
 		{"same direct destination", "a", "b", "/data/a", "/data/a", directA, directB, "remote.path"},
@@ -176,6 +177,8 @@ func TestPairRootOverlaps(t *testing.T) {
 		{"different Windows drives", "a", "b", "D:/data/a", "E:/data/a", sameHost, sameHost, ""},
 		{"Windows UNC", "a", "b", "\\\\server\\share\\data", "\\\\SERVER\\Share/data/a", sameHost, sameHost, "remote.path"},
 		{"Windows UNC with forward slashes", "a", "b", "\\\\server\\share\\data", "//SERVER/Share/data/a", sameHost, sameHost, "remote.path"},
+		{"Windows UNC starts with slash and backslash", "a", "b", "\\\\server\\share\\data", "/\\server/share/data/child", sameHost, sameHost, "remote.path"},
+		{"Windows UNC starts with backslash and slash", "a", "b", "\\\\server\\share\\data", "\\/server/share/data/child", sameHost, sameHost, "remote.path"},
 		{"Windows UNC at distinct destinations", "a", "b", "\\\\server\\share\\data", "//SERVER/Share/data/a", sameHost, otherHost, ""},
 		{"different UNC shares", "a", "b", "\\\\server\\share\\data", "\\\\SERVER\\other/data", sameHost, sameHost, ""},
 	} {
@@ -191,6 +194,58 @@ func TestPairRootOverlaps(t *testing.T) {
 				} else if cfg != nil || err == nil || !strings.Contains(err.Error(), "pairs[1]."+tc.field+" overlaps pairs[0]."+tc.field) {
 					t.Fatalf("want overlap for %s, got %v, error = %v", tc.field, cfg, err)
 				}
+			}
+		})
+	}
+}
+
+func TestForwardSlashRemoteRootsUseWindowsSyntaxForTheirDestination(t *testing.T) {
+	ambiguous := pairFixture("first", localFixture("a"), "//srv/Data", "{host: shared}", "") +
+		pairFixture("second", localFixture("b"), "//srv/data", "{host: shared}", "")
+	for _, tc := range []struct {
+		host        string
+		wantOverlap bool
+	}{
+		{"shared", true},
+		{"other", false},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			hint := pairFixture("third", localFixture("c"), "D:/other", "{host: "+tc.host+"}", "")
+			cfg, err := decodeFixture(t, "pairs:\n"+ambiguous+hint, nil)
+			if tc.wantOverlap {
+				if cfg != nil || err == nil || !strings.Contains(err.Error(), "pairs[1].remote.path overlaps pairs[0].remote.path") {
+					t.Fatalf("want UNC overlap, got cfg = %v, error = %v", cfg, err)
+				}
+			} else if err != nil || len(cfg.Pairs) != 3 {
+				t.Fatalf("want distinct POSIX roots, got cfg = %v, error = %v", cfg, err)
+			}
+		})
+	}
+}
+
+func TestRemoteRootDeviceNames(t *testing.T) {
+	for _, tc := range []struct {
+		path   string
+		reject bool
+	}{
+		{"D:/fixture/NUL", true},
+		{"D:/fixture/nUl.txt/child", true},
+		{"D:/fixture/AUX .txt", true},
+		{"D:/fixture/COM¹", true},
+		{"\\\\server\\share\\fixture\\LPT9", true},
+		{"D:/fixture/COM10", false},
+		{"D:/fixture/console", false},
+		{"/fixture/NUL", false},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			source := "pairs:\n" + pairFixture("first", localFixture("a"), tc.path, "{host: backup}", "")
+			cfg, err := decodeFixture(t, source, nil)
+			if tc.reject {
+				if cfg != nil || err == nil || !strings.Contains(err.Error(), "pairs[0].remote.path") {
+					t.Fatalf("want a path error, got cfg = %v, error = %v", cfg, err)
+				}
+			} else if err != nil || len(cfg.Pairs) != 1 {
+				t.Fatalf("want a valid pair, got cfg = %v, error = %v", cfg, err)
 			}
 		})
 	}

@@ -12,32 +12,11 @@ type rootPath struct {
 	parts   []string
 }
 
-func parseRemoteRoots(value string) []rootPath {
-	windows := hasDrive(value) || strings.HasPrefix(value, "\\\\")
-	root, ok := parseRoot(value, windows)
-	if !ok {
-		return nil
-	}
-	roots := []rootPath{root}
-	// A leading // can be a POSIX path or a Windows UNC path. Check both
-	// interpretations without losing POSIX overlaps such as /data and //data.
-	if strings.HasPrefix(value, "//") {
-		if unc, ok := parseRoot(value, true); ok {
-			roots = append(roots, unc)
-		}
-	}
-	return roots
-}
-
-func remoteRootsOverlap(roots, others []rootPath) bool {
-	for _, root := range roots {
-		for _, other := range others {
-			if root.overlaps(other) {
-				return true
-			}
-		}
-	}
-	return false
+// Windows drive paths and UNC prefixes containing a backslash identify
+// Windows syntax without confusing paths that start with POSIX double slashes.
+func hasWindowsRootSyntax(value string) bool {
+	return hasDrive(value) || strings.HasPrefix(value, "\\\\") ||
+		strings.HasPrefix(value, "\\/") || strings.HasPrefix(value, "/\\")
 }
 
 func hasDrive(value string) bool {
@@ -75,7 +54,7 @@ func parseRoot(value string, windows bool) (rootPath, bool) {
 			case "", ".", "..":
 				continue
 			}
-			if !validWindowsName(component) {
+			if !validWindowsName(component) || isWindowsDeviceName(component) {
 				return rootPath{}, false
 			}
 		}
@@ -92,6 +71,22 @@ func parseRoot(value string, windows bool) (rootPath, bool) {
 func validWindowsName(name string) bool {
 	return name != "" && !strings.HasSuffix(name, ".") && !strings.HasSuffix(name, " ") &&
 		!strings.ContainsAny(name, "<>:\"|?*") && !strings.ContainsFunc(name, unicode.IsControl)
+}
+
+func isWindowsDeviceName(name string) bool {
+	stem, _, _ := strings.Cut(name, ".")
+	stem = strings.ToUpper(strings.TrimRight(stem, " "))
+	switch stem {
+	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
+		return true
+	}
+	if strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT") {
+		switch stem[3:] {
+		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³":
+			return true
+		}
+	}
+	return false
 }
 
 func (root rootPath) overlaps(other rootPath) bool {
