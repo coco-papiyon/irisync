@@ -15,6 +15,8 @@ func TestLinuxScanExclusionsAndCollisions(t *testing.T) {
 	writeFile(t, root, "safe", "safe text")
 	writeFile(t, root, "Tree", "collides with a directory")
 	writeFile(t, root, "tree/child", "must not descend")
+	writeFile(t, root, "Ä/report", "must not descend")
+	writeFile(t, root, "ä/report", "must not descend")
 	writeFile(t, root, "NUL.txt", "invalid name")
 	writeFile(t, outside, "secret", "not a scan candidate")
 
@@ -37,9 +39,31 @@ func TestLinuxScanExclusionsAndCollisions(t *testing.T) {
 	requireOnlyFile(t, got, "safe")
 	requireIssue(t, got, "Tree", NameCollision)
 	requireIssue(t, got, "tree", NameCollision)
+	requireIssue(t, got, "Ä", NameCollision)
+	requireIssue(t, got, "ä", NameCollision)
 	requireIssue(t, got, "NUL.txt", InvalidName)
 	for _, name := range []string{"outside-link", "inside-link", "fifo"} {
 		requireIssue(t, got, name, Excluded)
+	}
+}
+
+func TestLinuxRootPathIsCheckedBeforeCleaning(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	writeFile(t, root, "safe/marker", "must not scan a different directory")
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Scan(context.Background(), root+"/link/../safe")
+	if err == nil || len(got.Files) != 0 {
+		t.Fatalf("expected the original root spelling to be rejected, got %+v, error %v", got, err)
+	}
+}
+
+func TestLinuxCaseComparisonPreservesDistinctNames(t *testing.T) {
+	names := []string{"Ǆ", "ǅ", "ა", "Ა", "\U00010400", "\U00010428", "\xff", "\ufffd"}
+	collisions, err := collidingNames(names)
+	if err != nil || len(collisions) != 0 {
+		t.Fatalf("unexpected collisions: %v, error %v", collisions, err)
 	}
 }
 

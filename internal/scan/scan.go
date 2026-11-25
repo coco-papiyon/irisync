@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -61,6 +62,16 @@ func Scan(ctx context.Context, rootPath string) (Result, error) {
 	}
 	if rootPath == "" {
 		return Result{}, errors.New("scan root is required")
+	}
+	if filepath.VolumeName(rootPath) != "" && !filepath.IsAbs(rootPath) {
+		return Result{}, errors.New("scan root with a volume must be absolute")
+	}
+	// Inspect the supplied path before Abs can remove an unchecked name
+	// such as the link in link/../dir.
+	for _, component := range strings.Split(filepath.ToSlash(rootPath), "/") {
+		if component == ".." {
+			return Result{}, errors.New("scan root must not contain a parent path component")
+		}
 	}
 	absolute, err := filepath.Abs(rootPath)
 	if err != nil {

@@ -20,9 +20,10 @@ D-18 のうち、OS ごとのパス表現、名前の互換性、リンクと再
 ### ローカル走査の実装
 
 - `internal/scan.Scan` はファイルのメタデータと、除外・名前エラー・衝突・読込失敗・変更・未走査の情報を返す。各問題は報告されたパスとその配下に適用する。ルートを開けない場合や走査を中断した場合はエラーを返す。後続処理は未確認の範囲を削除判定に使わない。
+- ルート指定の `..` とドライブ相対パスは絶対パス化の前に拒否する。`link/../dir` を字句上の別のパスに変換すると、指定先と異なるディレクトリを走査し得る。
 - Linux はルートのファイルディスクリプタを基点に `openat2` で探索し、子のシンボリックリンクとマウント境界を越えない。通常ファイルとディレクトリだけを、確認済みのディスクリプタから読み取り用に開く。`openat2` を使える Linux カーネルと `/proc/self/fd` が必要。[openat2](https://man7.org/linux/man-pages/man2/openat2.2.html)
 - Windows はディレクトリハンドルを基点に `NtCreateFile` で開き、経路と最終要素の再解析ポイントを除外する。読み取った名前はシステムの大小文字を区別しない序数比較で照合する。[OBJECT_ATTRIBUTES](https://learn.microsoft.com/en-us/windows/win32/api/ntdef/ns-ntdef-_object_attributes)
-- Linux の走査でも、Windows の禁止名と ASCII 英字の大小文字の衝突を検出する。非 ASCII の名前が転送先で同じ名前になるかは、転送先の OS とファイルシステムの規則で確認する。確認前に同名ファイルとして上書きしない。
+- Linux の走査でも、Windows の禁止名と大小文字の衝突を検出する。Linux は Windows の序数比較で使われる大文字化に合わせたテーブルを用い、`Ä` と `ä` などの衝突を検出する。このテーブルには Windows 上で取得した UTF-16 コード単位の変換を記録し、Windows で `go generate ./internal/scan` を実行すると更新できる。転送先のファイルシステム固有の衝突は転送時にも確認する。[CompareStringOrdinal](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-comparestringordinal) · [RtlUpcaseUnicodeChar](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/nf-wdm-rtlupcaseunicodechar)
 
 ## 受入条件と検証方法
 

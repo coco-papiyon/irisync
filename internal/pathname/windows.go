@@ -14,7 +14,7 @@ func ValidWindowsName(name string) bool {
 func IsWindowsDeviceName(name string) bool {
 	stem, _, _ := strings.Cut(name, ".")
 	stem = strings.TrimRight(stem, " ")
-	switch FoldWindowsASCII(stem) {
+	switch foldWindowsASCII(stem) {
 	case "con", "prn", "aux", "nul", "conin$", "conout$":
 		return true
 	}
@@ -40,8 +40,7 @@ func EqualWindowsASCII(left, right string) bool {
 	return true
 }
 
-// FoldWindowsASCII folds ASCII letters and leaves all UTF-8 bytes unchanged.
-func FoldWindowsASCII(name string) string {
+func foldWindowsASCII(name string) string {
 	for i := 0; i < len(name); i++ {
 		if lowerASCII(name[i]) != name[i] {
 			result := []byte(name)

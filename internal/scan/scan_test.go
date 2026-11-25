@@ -68,6 +68,10 @@ func TestMissingRootAndCanceledScan(t *testing.T) {
 			t.Fatalf("invalid root %q: got %+v, error %v", path, got, err)
 		}
 	}
+	parentComponent := root + "/child/.."
+	if got, err := Scan(context.Background(), parentComponent); err == nil || len(got.Files) != 0 {
+		t.Fatalf("parent component was accepted: got %+v, error %v", got, err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	got, err := Scan(ctx, root)
@@ -102,16 +106,19 @@ func TestMetadataChangeInvalidatesSnapshot(t *testing.T) {
 }
 
 func TestCollisionComparison(t *testing.T) {
-	collisions, err := collidingNames([]string{"Child", "CHILD", "child", "Childish", "K", "K"})
+	collisions, err := collidingNames([]string{
+		"Child", "CHILD", "child", "Childish", "Ä", "ä", "É", "é", "K", "K",
+		"が", "か\u3099",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"Child", "CHILD", "child"} {
+	for _, name := range []string{"Child", "CHILD", "child", "Ä", "ä", "É", "é"} {
 		if !collisions[name] {
 			t.Errorf("missing collision for %q", name)
 		}
 	}
-	for _, name := range []string{"Childish", "K", "K"} {
+	for _, name := range []string{"Childish", "K", "K", "が", "か\u3099"} {
 		if collisions[name] {
 			t.Errorf("unexpected collision for %q", name)
 		}

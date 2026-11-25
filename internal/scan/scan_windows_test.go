@@ -11,6 +11,13 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestWindowsRejectsDriveRelativeRoot(t *testing.T) {
+	got, err := Scan(context.Background(), "C:..")
+	if err == nil || len(got.Files) != 0 {
+		t.Fatalf("drive-relative root was accepted: got %+v, error %v", got, err)
+	}
+}
+
 func TestWindowsJunctions(t *testing.T) {
 	root, outside := t.TempDir(), t.TempDir()
 	writeFile(t, root, "safe", "inside")

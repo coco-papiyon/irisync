@@ -1,5 +1,7 @@
 package scan
 
+//go:generate go run windowscasegen/main.go
+
 import (
 	"fmt"
 	"slices"
