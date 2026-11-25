@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,12 +35,19 @@ func TestCLI(t *testing.T) {
 		checkCLI(t, controller, 1, "could not read configuration file", "--config", t.TempDir())
 	})
 
+	localRoot := "/data/local"
+	if runtime.GOOS == "windows" {
+		localRoot = "C:/data/local"
+	}
+	pairConfig := fmt.Sprintf("pairs:\n  - id: sample\n    local: {path: %q}\n    remote: {path: /data/remote, ssh: {host: backup}}\n", localRoot)
 	for _, test := range []struct {
 		name       string
 		yaml       string
 		diagnostic string
 	}{
 		{"configuration", "pairs: []\n", ""},
+		{"valid pair", pairConfig + "    startup: start\n", ""},
+		{"invalid pair startup", pairConfig + "    startup: fixture-value\n", "pairs[0].startup"},
 		{"empty mapping", "{}\n", ""},
 		{"empty document", "", "expected one mapping"},
 		{"syntax error", "fixture-value: [\n", "syntax error"},
@@ -119,6 +127,9 @@ func checkCLI(t *testing.T, binary string, wantCode int, diagnostic string, args
 	var stdout, stderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, binary, args...)
 	cmd.Dir = t.TempDir()
+	cmd.Env = slices.DeleteFunc(cmd.Environ(), func(setting string) bool {
+		return strings.HasPrefix(strings.ToUpper(setting), "IRISYNC_")
+	})
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()

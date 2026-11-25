@@ -14,8 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Load reads a single YAML mapping and returns its root node.
-func Load(path string) (*yaml.Node, error) {
+// readMapping reads a single YAML mapping and checks it for duplicate keys.
+func readMapping(path string) (*yaml.Node, error) {
 	data, err := os.ReadFile(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
