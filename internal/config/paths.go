@@ -75,12 +75,13 @@ func validWindowsName(name string) bool {
 
 func isWindowsDeviceName(name string) bool {
 	stem, _, _ := strings.Cut(name, ".")
-	stem = strings.ToUpper(strings.TrimRight(stem, " "))
-	switch stem {
-	case "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$":
-		return true
+	stem = strings.TrimRight(stem, " ")
+	for _, device := range [...]string{"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$"} {
+		if equalWindowsPathPart(stem, device) {
+			return true
+		}
 	}
-	if strings.HasPrefix(stem, "COM") || strings.HasPrefix(stem, "LPT") {
+	if len(stem) > 3 && (equalWindowsPathPart(stem[:3], "COM") || equalWindowsPathPart(stem[:3], "LPT")) {
 		switch stem[3:] {
 		case "1", "2", "3", "4", "5", "6", "7", "8", "9", "¹", "²", "³":
 			return true

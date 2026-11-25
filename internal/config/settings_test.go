@@ -264,9 +264,12 @@ func TestRemoteRootDeviceNames(t *testing.T) {
 		{"D:/fixture/nUl.txt/child", true},
 		{"D:/fixture/AUX .txt", true},
 		{"D:/fixture/COM¹", true},
+		{"D:/fixture/cOm¹.txt", true},
+		{"D:/fixture/cOnIn$", true},
 		{"\\\\server\\share\\fixture\\LPT9", true},
 		{"D:/fixture/COM10", false},
 		{"D:/fixture/console", false},
+		{"D:/fixture/conın$", false},
 		{"/fixture/NUL", false},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
