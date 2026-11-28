@@ -27,6 +27,16 @@ Windows コントローラーでは `local.path` に `C:/data/documents` のよ�
 - `id`、`local.path`、`remote.path`、`remote.ssh.host` は必須です。`id` は大文字・小文字を区別する一意の文字列です。
 - `startup` は `start`（開始要求）、`stop`（停止）、`restore`（保存した希望状態を復元）から選びます。既定値は `restore` です。履歴がない場合の停止は後続の状態管理が処理します。
 - `remote.ssh.use_ssh_config` の既定値は `true` です。この場合、`host` は OpenSSH のホストエイリアスです。`false` の場合は `host` にホスト名か IP アドレスを指定し、`user` を指定します。IPv6 アドレスは角括弧なしで指定します。`port` は 1〜65535 で既定値は 22 です。`identity_file` には必要に応じて鍵ファイルのパスを指定できます。
+
+### リモート走査
+
+リモート側で OS に合った `irisync-agent`（Windows では `irisync-agent.exe`）を用意し、SSH で起動されるシェルの `PATH` に置きます。コントローラー側には OpenSSH クライアントを用意し、信頼済みのホスト鍵を `known_hosts` に登録します。
+
+```text
+controller scan-remote --config config.yaml --pair pair-001
+```
+
+エイリアス方式は OpenSSH の設定を読み込み、直接指定方式は設定ファイルの接続指定を使います。いずれも `known_hosts` への事前登録と非対話認証が必要です。ホスト鍵の DNS 照合と `KnownHostsCommand` は無効にします。SSH の標準入出力で走査が完了すると JSON を返します。走査中に切断された場合は部分結果を返さず、エラーになります。Agent 用の受信ポートは不要です。
 - 同じ SSH 接続先にドライブ付きパス（例 `D:/shared`）または先頭の区切りにバックスラッシュを含む UNC パス（例 `\\server\share\data`）があれば、その接続先のすべての `remote.path` を Windows のパスとして検証します。各ルートにドライブ付き絶対パスまたは UNC パスを指定してください。`/data` のようにドライブや共有名を省略したパスは拒否します。`//server/share/data` はこの場合に UNC として扱います。Windows 形式を示すルートがなければ、すべて POSIX の絶対パスとして扱います。
 - Windows の同期ルートでは、`NUL`、`COM1`、`LPT1` などの予約デバイス名をパス要素に使えません。拡張子が付いた `NUL.txt` なども拒否します。
 - パスには日本語や、空白、括弧、`&`、`+` など OS が許可する記号を使えます。YAML では `'C:/資料（共有）/報告 [Q1] & 集計'` のように引用符で囲めます。

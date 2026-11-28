@@ -34,6 +34,14 @@ func TestCLI(t *testing.T) {
 	t.Run("unreadable configuration", func(t *testing.T) {
 		checkCLI(t, controller, 1, "could not read configuration file", "--config", t.TempDir())
 	})
+	t.Run("remote scan arguments", func(t *testing.T) {
+		checkCLI(t, controller, 2, "--config and --pair are required", "scan-remote", "--pair", "missing")
+		path := filepath.Join(t.TempDir(), "config.yaml")
+		if err := os.WriteFile(path, []byte("pairs: []\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		checkCLI(t, controller, 1, "pair not found", "scan-remote", "--config", path, "--pair", "missing")
+	})
 	t.Run("state database", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "settings.yaml")
