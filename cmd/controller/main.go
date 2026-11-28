@@ -14,8 +14,16 @@ func main() {
 }
 
 func run(args []string, stderr io.Writer) int {
+	if len(args) != 0 && args[0] == "scan-remote" {
+		return runRemoteScan(args[1:], os.Stdout, stderr)
+	}
 	flags := flag.NewFlagSet("controller", flag.ContinueOnError)
 	flags.SetOutput(stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(stderr, "Usage of controller:")
+		flags.PrintDefaults()
+		fmt.Fprintln(stderr, "  controller scan-remote --config <path> --pair <id>")
+	}
 	var configPath string
 	var hasConfig bool
 	flags.Func("config", "load YAML configuration from this path", func(path string) error {
