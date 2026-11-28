@@ -89,9 +89,28 @@ func TestPlanProtectsCrossSideNamingAndUnverifiedAbsence(t *testing.T) {
 	remote := scan.Inventory{Result: scan.Result{Files: []scan.File{{Path: "folder/right.txt"}}}}
 	plan, err := Plan(ctx, baselineFixture{}, pair, local, remote)
 	requireOK(t, err)
-	if len(plan) != 3 || plan[0].Reason != NameCollision || plan[1].Reason != NameCollision ||
-		plan[2].Path != "only-local.txt" || plan[2].Action != Reobserve {
-		t.Fatalf("unsafe cross-side plan: %+v", plan)
+	if len(plan) != 3 || plan[0].Action != Reobserve ||
+		plan[1].Action != Conflict || plan[1].Reason != NameCollision || plan[2].Action != Reobserve {
+		t.Fatalf("incomplete inventory did not require reobservation: %+v", plan)
+	}
+
+	remote.Complete = true
+	plan, err = Plan(ctx, baselineFixture{}, pair, local, remote)
+	requireOK(t, err)
+	if len(plan) != 3 ||
+		plan[0].Path != "Folder/left.txt" || plan[0].Action != Conflict || plan[0].Reason != NameCollision ||
+		plan[1].Path != "folder/right.txt" || plan[1].Action != Conflict || plan[1].Reason != NameCollision ||
+		plan[2].Path != "only-local.txt" || plan[2].Action != Copy || plan[2].Target != Remote {
+		t.Fatalf("unexpected plan after complete observations: %+v", plan)
+	}
+
+	remote.Issues = []scan.Issue{{Kind: scan.Unscanned}}
+	plan, err = Plan(ctx, baselineFixture{}, pair, local, remote)
+	requireOK(t, err)
+	for _, decision := range plan {
+		if decision.Remote.Presence != Unknown || decision.Action != Reobserve {
+			t.Fatalf("root issue left a decision based on stale observations: %+v", decision)
+		}
 	}
 	readErr := errors.New("baseline read failed")
 	if decisions, err := Plan(ctx, baselineFixture{err: readErr}, pair, local, remote); !errors.Is(err, readErr) || decisions != nil {

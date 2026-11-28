@@ -83,7 +83,7 @@ func Plan(ctx context.Context, db BaselineReader, pair config.Pair, local, remot
 		}
 		a, b := localIndex.observe(path), remoteIndex.observe(path)
 		decision := decide(path, paths[path], a, b, preferred)
-		if covered(path, collisions) {
+		if decision.Action != Reobserve && covered(path, collisions) {
 			decision = Decision{Path: path, Action: Conflict, Reason: NameCollision, Local: a, Remote: b}
 		}
 		decisions = append(decisions, decision)
