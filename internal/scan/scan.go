@@ -46,10 +46,19 @@ type Result struct {
 	Issues []Issue
 }
 
+// Inventory includes directory observations for callers that must distinguish
+// a nonexistent file from a file replaced by a directory.
+type Inventory struct {
+	Result
+	Directories []string
+	Complete    bool // A successful traversal completed, subject to Issues.
+}
+
 type scanner struct {
-	ctx    context.Context
-	root   *os.File
-	result Result
+	ctx         context.Context
+	root        *os.File
+	result      Result
+	directories *[]string
 }
 
 // Scan walks a root without following links or reading special files. It
@@ -57,6 +66,17 @@ type scanner struct {
 // A non-nil error indicates that the root could not be scanned or the scan
 // was canceled. Paths covered by issues, or by a root error, are unconfirmed.
 func Scan(ctx context.Context, rootPath string) (Result, error) {
+	return scanRoot(ctx, rootPath, nil)
+}
+
+// ScanInventory walks the same root as Scan and also records directories.
+func ScanInventory(ctx context.Context, rootPath string) (Inventory, error) {
+	var directories []string
+	result, err := scanRoot(ctx, rootPath, &directories)
+	return Inventory{Result: result, Directories: directories, Complete: err == nil}, err
+}
+
+func scanRoot(ctx context.Context, rootPath string, directories *[]string) (Result, error) {
 	if err := ctx.Err(); err != nil {
 		return Result{Issues: []Issue{{Kind: Unscanned, Err: err}}}, err
 	}
@@ -82,7 +102,7 @@ func Scan(ctx context.Context, rootPath string) (Result, error) {
 		return Result{}, fmt.Errorf("open scan root: %w", err)
 	}
 	defer root.Close()
-	s := scanner{ctx: ctx, root: root}
+	s := scanner{ctx: ctx, root: root, directories: directories}
 	openCurrentRoot := func() (*os.File, error) { return openRoot(absolute) }
 	if err := s.walk(root, "", openCurrentRoot); err != nil {
 		s.record("", Unscanned, err)
@@ -106,6 +126,13 @@ func (s *scanner) walk(directory *os.File, relative string, openCurrent func() (
 	}
 	slices.Sort(names)
 	fileStart := len(s.result.Files)
+	var directoryStart int
+	if s.directories != nil {
+		directoryStart = len(*s.directories)
+		if relative != "" {
+			*s.directories = append(*s.directories, relative)
+		}
+	}
 
 	// Identify all siblings in a collision before reading any of them,
 	// including file/directory collisions and collisions in excluded entries.
@@ -136,6 +163,9 @@ func (s *scanner) walk(directory *os.File, relative string, openCurrent func() (
 
 	if err := unchanged(directory, before, openCurrent); err != nil {
 		s.result.Files = s.result.Files[:fileStart]
+		if s.directories != nil {
+			*s.directories = (*s.directories)[:directoryStart]
+		}
 		if relative == "" {
 			return err
 		}

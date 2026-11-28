@@ -21,24 +21,58 @@ type File struct {
 }
 
 func (s *Store) Baseline(ctx context.Context, pairID, path string) (File, bool, error) {
-	var file File
-	var hash []byte
-	var modified string
-	err := s.db.QueryRowContext(ctx, `SELECT kind, size, sha256, mtime, deleted FROM sync_files
-		WHERE pair_id = ? AND relative_path = ?`, pairID, path).
-		Scan(&file.Kind, &file.Size, &hash, &modified, &file.Deleted)
+	row := s.db.QueryRowContext(ctx, `SELECT kind, size, sha256, mtime, deleted FROM sync_files
+		WHERE pair_id = ? AND relative_path = ?`, pairID, path)
+	file, err := readBaseline(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return File{}, false, nil
 	}
+	return file, err == nil, err
+}
+
+type BaselineEntry struct {
+	Path string
+	File
+}
+
+// Baselines reads the confirmed baselines and tombstones for a single pair.
+func (s *Store) Baselines(ctx context.Context, pairID string) ([]BaselineEntry, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT relative_path, kind, size, sha256, mtime, deleted
+		FROM sync_files WHERE pair_id = ? ORDER BY relative_path`, pairID)
 	if err != nil {
-		return File{}, false, err
+		return nil, err
+	}
+	defer rows.Close()
+	var entries []BaselineEntry
+	for rows.Next() {
+		var entry BaselineEntry
+		entry.File, err = readBaseline(rows, &entry.Path)
+		if err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+type rowScanner interface {
+	Scan(...any) error
+}
+
+func readBaseline(row rowScanner, prefix ...any) (File, error) {
+	var file File
+	var hash []byte
+	var modified string
+	if err := row.Scan(append(prefix, &file.Kind, &file.Size, &hash, &modified, &file.Deleted)...); err != nil {
+		return File{}, err
 	}
 	if len(hash) != len(file.SHA256) {
-		return File{}, false, errors.New("stored SHA-256 has an invalid length")
+		return File{}, errors.New("stored SHA-256 has an invalid length")
 	}
 	copy(file.SHA256[:], hash)
+	var err error
 	file.ModTime, err = time.Parse(timestampLayout, modified)
-	return file, err == nil, err
+	return file, err
 }
 
 type ConfirmedResult struct {
