@@ -30,8 +30,9 @@ func Scan(ctx context.Context, connection config.SSH, root string) (scan.Result,
 }
 
 func sshArgs(connection config.SSH) []string {
-	args := []string{"-T",
+	args := []string{"-T", "-x",
 		"-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes", "-o", "UpdateHostKeys=no",
+		"-o", "VerifyHostKeyDNS=no", "-o", "KnownHostsCommand=none",
 		"-o", "ControlPath=none", "-o", "ClearAllForwardings=yes", "-o", "ForwardAgent=no",
 		"-o", "PermitLocalCommand=no", "-o", "RemoteCommand=none", "-o", "SessionType=default",
 		"-o", "ForkAfterAuthentication=no", "-o", "StdinNull=no", "-o", "ConnectTimeout=15",

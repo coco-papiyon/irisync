@@ -59,6 +59,26 @@ func compatible(m message) bool {
 	return m.Version == version && slices.Contains(m.Features, scanFeature)
 }
 
+func (m message) validShape() bool {
+	negotiation := m.Version != 0 || len(m.Features) != 0
+	switch m.Type {
+	case "hello":
+		return m.Root == "" && m.File == nil && m.Issue == nil && m.Code == ""
+	case "scan":
+		return !negotiation && m.Root != "" && m.File == nil && m.Issue == nil && m.Code == ""
+	case "file":
+		return !negotiation && m.Root == "" && m.File != nil && m.Issue == nil && m.Code == ""
+	case "issue":
+		return !negotiation && m.Root == "" && m.File == nil && m.Issue != nil && m.Code == ""
+	case "complete":
+		return !negotiation && m.Root == "" && m.File == nil && m.Issue == nil && m.Code == ""
+	case "failure":
+		return !negotiation && m.Root == "" && m.File == nil && m.Issue == nil && m.Code != ""
+	default:
+		return false
+	}
+}
+
 func readMessage(in io.Reader) (message, int, error) {
 	var header [4]byte
 	var result message
@@ -73,7 +93,7 @@ func readMessage(in io.Reader) (message, int, error) {
 	if _, err := io.ReadFull(in, payload); err != nil {
 		return result, 0, err
 	}
-	if !utf8.Valid(payload) || json.Unmarshal(payload, &result) != nil || result.Type == "" {
+	if !utf8.Valid(payload) || json.Unmarshal(payload, &result) != nil || !result.validShape() {
 		return message{}, 0, ErrProtocol
 	}
 	return result, size + len(header), nil

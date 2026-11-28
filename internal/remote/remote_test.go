@@ -180,7 +180,8 @@ func TestSSHArgumentsRequireTrustAndUseFixedCommand(t *testing.T) {
 		if !slices.Equal(args[len(args)-3:], []string{"--", cfg.Host, "irisync-agent --stdio"}) {
 			t.Fatalf("unexpected remote command: %q", args)
 		}
-		for _, option := range []string{"StrictHostKeyChecking=yes", "BatchMode=yes", "ClearAllForwardings=yes", "ControlPath=none"} {
+		for _, option := range []string{"StrictHostKeyChecking=yes", "VerifyHostKeyDNS=no", "KnownHostsCommand=none",
+			"BatchMode=yes", "ClearAllForwardings=yes", "ControlPath=none"} {
 			if !slices.Contains(args, option) {
 				t.Fatalf("missing SSH policy %q", option)
 			}
@@ -193,6 +194,22 @@ func TestSSHArgumentsRequireTrustAndUseFixedCommand(t *testing.T) {
 			!slices.Contains(args, "sync") || !slices.Contains(args, cfg.IdentityFile) {
 			t.Fatalf("lost direct connection options: %q", args)
 		}
+	}
+}
+
+func TestMalformedCompletionDiscardsEarlierFiles(t *testing.T) {
+	var wire bytes.Buffer
+	size, now := int64(0), time.Now()
+	if err := writeMessage(&wire, message{Type: "file", File: &scanFile{
+		Path: "candidate.txt", Size: &size, ModTime: &now, SHA256: make([]byte, sha256.Size),
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeMessage(&wire, message{Type: "complete", Code: "scan_failed"}); err != nil {
+		t.Fatal(err)
+	}
+	if result, err := receiveScan(&wire); !errors.Is(err, ErrProtocol) || len(result.Files) != 0 {
+		t.Fatalf("malformed completion retained a partial scan: result=%+v err=%v", result, err)
 	}
 }
 
