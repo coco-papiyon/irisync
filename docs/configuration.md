@@ -51,3 +51,9 @@ Windows コントローラーでは `local.path` に `C:/data/documents` のよ�
 | `performance.max_transfers_per_pair` | `2`（暫定） | |
 
 時間は `60s` や `30m` のような単位付きの正の値です。`sync.min_delay` は `sync.max_delay` 以下にします。同時実行数は正の整数です。サイズはバイト数、または単位 `B`、`KiB`、`MiB`、`GiB`、`TiB` 付きの非負整数です。`0` は無制限を意味します。ペアの `sync.max_file_size` は、明示した `0` も含めて確定済みの全体値より優先します。
+
+## 状態データベース
+
+`controller --config settings.yaml` は、設定の検証後に同じディレクトリの `settings.yaml.state.sqlite3` を開きます。保存先は `--state-db <path>` で変更できます。同期対象のルートの外にあるローカルディスクを使い、親ディレクトリは事前に作成してください。
+
+`startup: restore` は保存済みの希望状態を読み込み、希望状態の保存履歴がないペアは停止と判定します。DB の読み出しに失敗した場合は起動エラーになります。進捗は再起動後も保持され、新しい全体走査の開始時にリセットされます。

@@ -34,6 +34,23 @@ func TestCLI(t *testing.T) {
 	t.Run("unreadable configuration", func(t *testing.T) {
 		checkCLI(t, controller, 1, "could not read configuration file", "--config", t.TempDir())
 	})
+	t.Run("state database", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "settings.yaml")
+		if err := os.WriteFile(path, []byte("pairs: []\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		checkCLI(t, controller, 0, "", "--config", path)
+		if _, err := os.Stat(path + ".state.sqlite3"); err != nil {
+			t.Fatal(err)
+		}
+		explicit := filepath.Join(dir, "別の状態.sqlite3")
+		checkCLI(t, controller, 0, "", "--config", path, "--state-db", explicit)
+		if _, err := os.Stat(explicit); err != nil {
+			t.Fatal(err)
+		}
+		checkCLI(t, controller, 2, "--state-db needs a path and --config", "--state-db", explicit)
+	})
 
 	localRoot := "/data/local"
 	if runtime.GOOS == "windows" {
