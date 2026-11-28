@@ -26,6 +26,13 @@ func openTestStore(t *testing.T, ctx context.Context, path string) *Store {
 	return store
 }
 
+func claimTestItem(t *testing.T, ctx context.Context, store *Store, id int64, now time.Time) int64 {
+	t.Helper()
+	attempt, err := store.Claim(ctx, id, now)
+	must(t, err)
+	return attempt
+}
+
 func TestStateSurvivesReopen(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "状態 #1.sqlite3")
@@ -43,8 +50,8 @@ func TestStateSurvivesReopen(t *testing.T) {
 	for _, pair := range []string{"a", "b"} {
 		id, err := store.Enqueue(ctx, pair, "空 白/A.txt")
 		must(t, err)
-		must(t, store.Claim(ctx, id, now))
-		result := ConfirmedResult{QueueID: id, Baseline: File{
+		attempt := claimTestItem(t, ctx, store, id, now)
+		result := ConfirmedResult{QueueID: id, Attempt: attempt, Baseline: File{
 			Kind: "file", Size: 1, SHA256: sha256.Sum256([]byte(pair)), ModTime: now, Deleted: pair == "b",
 		}}
 		if pair == "a" {
@@ -60,11 +67,11 @@ func TestStateSurvivesReopen(t *testing.T) {
 	must(t, store.SaveScanProgress(ctx, "b", bGeneration, 0, nil, &zero))
 	interrupted, err := store.Enqueue(ctx, "a", "work")
 	must(t, err)
-	must(t, store.Claim(ctx, interrupted, now))
+	interruptedAttempt := claimTestItem(t, ctx, store, interrupted, now)
 	retry, err := store.Enqueue(ctx, "a", "retry")
 	must(t, err)
-	must(t, store.Claim(ctx, retry, now))
-	must(t, store.ScheduleRetry(ctx, retry, now.Add(time.Hour)))
+	retryAttempt := claimTestItem(t, ctx, store, retry, now)
+	must(t, store.ScheduleRetry(ctx, retry, retryAttempt, now.Add(time.Hour)))
 	must(t, store.Close())
 
 	store = openTestStore(t, ctx, path)
@@ -104,11 +111,11 @@ func TestStateSurvivesReopen(t *testing.T) {
 		!items[1].RetryAt.Equal(now.Add(time.Hour)) {
 		t.Fatalf("queue after reopen: %+v, err=%v", items, err)
 	}
-	if store.Claim(ctx, interrupted, now) == nil {
+	if _, err := store.Claim(ctx, interrupted, now); err == nil {
 		t.Fatal("an interrupted item was eligible before revalidation")
 	}
-	must(t, store.RequeueVerified(ctx, interrupted))
-	must(t, store.Claim(ctx, interrupted, now))
+	must(t, store.RequeueVerified(ctx, interrupted, interruptedAttempt))
+	claimTestItem(t, ctx, store, interrupted, now)
 }
 
 func TestApplyIsAtomicAndKeepsNewerQueueItems(t *testing.T) {
@@ -117,23 +124,23 @@ func TestApplyIsAtomicAndKeepsNewerQueueItems(t *testing.T) {
 	now := time.Now().UTC()
 	old, err := store.Enqueue(ctx, "a", "file")
 	must(t, err)
-	must(t, store.Claim(ctx, old, now))
-	must(t, store.Apply(ctx, ConfirmedResult{QueueID: old, Baseline: File{Kind: "file", Size: 7, ModTime: now}}))
+	oldAttempt := claimTestItem(t, ctx, store, old, now)
+	must(t, store.Apply(ctx, ConfirmedResult{QueueID: old, Attempt: oldAttempt, Baseline: File{Kind: "file", Size: 7, ModTime: now}}))
 	generation, err := store.StartScan(ctx, "a")
 	must(t, err)
 	current, err := store.Enqueue(ctx, "a", "file")
 	must(t, err)
 	next, err := store.Enqueue(ctx, "a", "file")
 	must(t, err)
-	if store.Claim(ctx, next, now) == nil {
+	if _, err := store.Claim(ctx, next, now); err == nil {
 		t.Fatal("a newer result could overtake the earlier item for its path")
 	}
-	must(t, store.Claim(ctx, current, now))
+	currentAttempt := claimTestItem(t, ctx, store, current, now)
 	_, err = store.db.ExecContext(ctx, `
 		CREATE TRIGGER fail_receipt BEFORE INSERT ON sync_receipts
 		BEGIN SELECT RAISE(ABORT, 'injected write failure'); END`)
 	must(t, err)
-	result := ConfirmedResult{QueueID: current, ProgressGeneration: generation,
+	result := ConfirmedResult{QueueID: current, Attempt: currentAttempt, ProgressGeneration: generation,
 		Baseline: File{Kind: "file", ModTime: now, Deleted: true}}
 	if err := store.Apply(ctx, result); err == nil {
 		t.Fatal("injected failure was ignored")
@@ -171,7 +178,7 @@ func TestApplyIsAtomicAndKeepsNewerQueueItems(t *testing.T) {
 	}
 	newGeneration, err := store.StartScan(ctx, "a")
 	must(t, err)
-	must(t, store.Claim(ctx, next, now))
+	result.Attempt = claimTestItem(t, ctx, store, next, now)
 	result.QueueID = next
 	must(t, store.Apply(ctx, result))
 	progress, _, err = store.Progress(ctx, "a")
@@ -199,7 +206,7 @@ func TestCommitFailureRechecksOnFreshConnection(t *testing.T) {
 	now := time.Now().UTC()
 	id, err := store.Enqueue(ctx, "a", "file")
 	must(t, err)
-	must(t, store.Claim(ctx, id, now))
+	attempt := claimTestItem(t, ctx, store, id, now)
 	_, err = store.db.ExecContext(ctx, `
 		PRAGMA foreign_keys = ON;
 		CREATE TABLE parent_test(id INTEGER PRIMARY KEY);
@@ -207,7 +214,7 @@ func TestCommitFailureRechecksOnFreshConnection(t *testing.T) {
 		CREATE TRIGGER fail_commit AFTER INSERT ON sync_receipts BEGIN INSERT INTO child_test VALUES (1); END;
 	`)
 	must(t, err)
-	result := ConfirmedResult{QueueID: id, Baseline: File{Kind: "file", ModTime: now}}
+	result := ConfirmedResult{QueueID: id, Attempt: attempt, Baseline: File{Kind: "file", ModTime: now}}
 	if err := store.Apply(ctx, result); err == nil {
 		t.Fatal("deferred commit failure was ignored")
 	}
@@ -217,4 +224,39 @@ func TestCommitFailureRechecksOnFreshConnection(t *testing.T) {
 	_, err = store.db.ExecContext(ctx, "DROP TRIGGER fail_commit")
 	must(t, err)
 	must(t, store.Apply(ctx, result))
+}
+
+func TestIncompleteScanCannotBeMarkedComplete(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	generation, err := store.StartScan(ctx, "a")
+	must(t, err)
+	total := int64(3)
+	must(t, store.SaveScanProgress(ctx, "a", generation, 1, &total, nil))
+	if err := store.CompleteInitialSync(ctx, "a", generation, time.Now()); err == nil {
+		t.Fatal("marked initial sync complete while the stored scan was incomplete")
+	}
+	must(t, store.SaveScanProgress(ctx, "a", generation, total, &total, nil))
+	must(t, store.CompleteInitialSync(ctx, "a", generation, time.Now()))
+}
+
+func TestEarlierAttemptCannotCompleteRetriedQueueItem(t *testing.T) {
+	ctx := context.Background()
+	store := openTestStore(t, ctx, filepath.Join(t.TempDir(), "state.sqlite"))
+	now := time.Now()
+	id, err := store.Enqueue(ctx, "a", "file")
+	must(t, err)
+	oldAttempt := claimTestItem(t, ctx, store, id, now)
+	old := ConfirmedResult{QueueID: id, Attempt: oldAttempt, Baseline: File{Kind: "file", ModTime: now}}
+	must(t, store.ScheduleRetry(ctx, id, oldAttempt, now))
+	currentAttempt := claimTestItem(t, ctx, store, id, now)
+	if err := store.Apply(ctx, old); err == nil {
+		t.Fatal("accepted a result from an earlier attempt")
+	}
+	if err := store.ScheduleRetry(ctx, id, oldAttempt, now); err == nil {
+		t.Fatal("an earlier attempt could reschedule newer work")
+	}
+	current := old
+	current.Attempt = currentAttempt
+	must(t, store.Apply(ctx, current))
 }

@@ -66,20 +66,26 @@ func (s *Store) Queue(ctx context.Context, pairID string) ([]QueueItem, error) {
 	return items, rows.Err()
 }
 
-func (s *Store) Claim(ctx context.Context, id int64, now time.Time) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE sync_queue
+// Claim returns the attempt number to use when finalizing or retrying the work.
+func (s *Store) Claim(ctx context.Context, id int64, now time.Time) (int64, error) {
+	var attempt int64
+	err := s.db.QueryRowContext(ctx, `UPDATE sync_queue
 		SET status = 'running', attempts = attempts + 1, retry_at = NULL
 		WHERE id = ? AND (status = 'waiting' OR (status = 'retry_wait' AND retry_at <= ?))
 			AND NOT EXISTS (SELECT 1 FROM sync_queue AS earlier
 				WHERE earlier.pair_id = sync_queue.pair_id AND earlier.relative_path = sync_queue.relative_path
-					AND earlier.id < sync_queue.id)`, id, timestamp(now))
-	return changed(result, err, "queue item is not ready")
+					AND earlier.id < sync_queue.id)
+		RETURNING attempts`, id, timestamp(now)).Scan(&attempt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, errors.New("queue item is not ready")
+	}
+	return attempt, err
 }
 
-func (s *Store) ScheduleRetry(ctx context.Context, id int64, at time.Time) error {
+func (s *Store) ScheduleRetry(ctx context.Context, id, attempt int64, at time.Time) error {
 	result, err := s.db.ExecContext(ctx, `UPDATE sync_queue SET status = 'retry_wait', retry_at = ?
-		WHERE id = ? AND status = 'running'`, timestamp(at), id)
-	return changed(result, err, "queue item is not running")
+		WHERE id = ? AND attempts = ? AND status = 'running'`, timestamp(at), id, attempt)
+	return changed(result, err, "queue attempt is not running or has changed")
 }
 
 // RecoverInterrupted is called at controller startup, before dispatching work.
@@ -89,7 +95,8 @@ func (s *Store) RecoverInterrupted(ctx context.Context) error {
 }
 
 // RequeueVerified lets the engine retry after it verifies the filesystem state.
-func (s *Store) RequeueVerified(ctx context.Context, id int64) error {
-	result, err := s.db.ExecContext(ctx, "UPDATE sync_queue SET status = 'waiting' WHERE id = ? AND status = 'needs_verification'", id)
-	return changed(result, err, "queue item does not need verification")
+func (s *Store) RequeueVerified(ctx context.Context, id, attempt int64) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE sync_queue SET status = 'waiting'
+		WHERE id = ? AND attempts = ? AND status = 'needs_verification'`, id, attempt)
+	return changed(result, err, "queue attempt does not need verification or has changed")
 }

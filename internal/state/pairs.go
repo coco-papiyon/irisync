@@ -96,7 +96,7 @@ func (s *Store) SaveScanProgress(ctx context.Context, id string, generation, sca
 // scan and transfers for this generation. Pending work still prevents completion.
 func (s *Store) CompleteInitialSync(ctx context.Context, id string, generation int64, at time.Time) error {
 	result, err := completeInitialSync(ctx, s.db, id, generation, at)
-	return changed(result, err, "initial sync has a stale generation or pending work")
+	return changed(result, err, "initial sync has a stale generation or incomplete work")
 }
 
 type executor interface {
@@ -106,7 +106,9 @@ type executor interface {
 func completeInitialSync(ctx context.Context, db executor, id string, generation int64, at time.Time) (sql.Result, error) {
 	return db.ExecContext(ctx, `
 		INSERT INTO pair_runtime_state(pair_id, initial_sync_completed_at)
-		SELECT ?, ? WHERE EXISTS (SELECT 1 FROM pair_progress WHERE pair_id = ? AND generation = ?)
+		SELECT ?, ? WHERE EXISTS (
+			SELECT 1 FROM pair_progress WHERE pair_id = ? AND generation = ? AND scanned = scan_total
+				AND (process_total IS NULL OR processed = process_total))
 			AND NOT EXISTS (SELECT 1 FROM sync_queue WHERE pair_id = ?)
 		ON CONFLICT(pair_id) DO UPDATE SET initial_sync_completed_at =
 			coalesce(pair_runtime_state.initial_sync_completed_at, excluded.initial_sync_completed_at)`,

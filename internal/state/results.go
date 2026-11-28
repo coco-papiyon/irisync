@@ -43,6 +43,7 @@ func (s *Store) Baseline(ctx context.Context, pairID, path string) (File, bool, 
 
 type ConfirmedResult struct {
 	QueueID                int64
+	Attempt                int64 `json:"-"` // Claim token, excluded from the durable result fingerprint.
 	Baseline               File
 	ProgressGeneration     int64 // Zero leaves progress unchanged.
 	InitialSyncCompletedAt *time.Time
@@ -51,7 +52,7 @@ type ConfirmedResult struct {
 // Apply records the result of a verified filesystem operation and completes
 // exactly its queue item. The receipt permits a safe retry after an unknown commit.
 func (s *Store) Apply(ctx context.Context, result ConfirmedResult) error {
-	if result.QueueID <= 0 || result.Baseline.Kind == "" || result.Baseline.Size < 0 ||
+	if result.QueueID <= 0 || result.Attempt <= 0 || result.Baseline.Kind == "" || result.Baseline.Size < 0 ||
 		result.ProgressGeneration < 0 || (result.InitialSyncCompletedAt != nil && result.ProgressGeneration == 0) {
 		return errors.New("invalid confirmed sync result")
 	}
@@ -120,9 +121,10 @@ func checkReceipt(ctx context.Context, db rowQuerier, id int64, fingerprint []by
 func applyResult(ctx context.Context, tx *sql.Tx, result ConfirmedResult, fingerprint []byte) error {
 	var pair, path string
 	err := tx.QueryRowContext(ctx, `SELECT pair_id, relative_path FROM sync_queue
-		WHERE id = ? AND status IN ('running','needs_verification')`, result.QueueID).Scan(&pair, &path)
+		WHERE id = ? AND attempts = ? AND status IN ('running','needs_verification')`,
+		result.QueueID, result.Attempt).Scan(&pair, &path)
 	if errors.Is(err, sql.ErrNoRows) {
-		return errors.New("queue item is not running or awaiting verification")
+		return errors.New("queue attempt has changed or is not running or awaiting verification")
 	}
 	if err != nil {
 		return err
